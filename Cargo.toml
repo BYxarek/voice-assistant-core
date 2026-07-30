@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/assistant-core",
+    "apps/assistant-cli",
+    "apps/assistant-daemon",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/BYxarek/voice-assistant-core"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
+hound = "3"
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sentencepiece-rs = "0.2.2"
+sha2 = "0.10"
+sherpa-onnx = "1.13.4"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Voice Assistant Core — публичный API и руководство">
+  <title>Voice Assistant Core · API v1</title>
+  <style>
+    :root{color-scheme:dark;--bg:#09111e;--panel:#111d30;--text:#eef5ff;--muted:#a7b5ca;--line:#2b405e;--accent:#67d9ff}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 Segoe UI,system-ui,sans-serif}
+    .layout{display:grid;grid-template-columns:240px minmax(0,850px);gap:48px;max-width:1180px;margin:auto;padding:40px 24px 90px}
+    nav{position:sticky;top:30px;align-self:start}nav a{display:block;padding:6px 0;color:var(--muted)}
+    a{color:var(--accent)}h1{font-size:44px;line-height:1.1}h2{margin-top:58px;border-bottom:1px solid var(--line);padding-bottom:8px}
+    pre{overflow:auto;padding:18px;border:1px solid var(--line);border-radius:10px;background:#050a12}code{font-family:Cascadia Code,Consolas,monospace}
+    table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+    .note{padding:14px 18px;border-left:4px solid var(--accent);background:var(--panel)}
+    @media(max-width:760px){.layout{display:block}nav{position:static}.layout>nav{margin-bottom:35px}h1{font-size:34px}}
+  </style>
+</head>
+<body>
+<div class="layout">
+  <nav aria-label="Разделы">
+    <strong>Voice Assistant Core</strong>
+    <a href="#start">Быстрый старт</a>
+    <a href="#architecture">Архитектура</a>
+    <a href="#api">Публичный Rust API</a>
+    <a href="#extension">Extension API</a>
+    <a href="#ipc">IPC v1</a>
+    <a href="#config">Конфигурация</a>
+    <a href="#models">Модели</a>
+    <a href="#diagnostics">Диагностика</a>
+    <a href="api.html">Полный API</a>
+  </nav>
+  <main>
+    <h1>Voice Assistant Core</h1>
+    <p>Voice Assistant Core <strong>1.0.0</strong> — локальное Windows-ядро с
+      versioned IPC и стабильным Rust extension API v1.
+      GUI, аудио, inference и типизированные команды разделены явными границами.</p>
+    <p><a href="rustdoc/assistant_core/index.html">Открыть опубликованный Rustdoc</a>.
+      Локально после <code>cargo doc --workspace --all-features --no-deps</code>
+      он находится в <code>target/doc/assistant_core/index.html</code>.</p>
+    <p><a href="api.html">Полный справочник API</a> содержит все публичные модули,
+      методы runtime, состояния, события, IPC request/response, параметры
+      конфигурации, adapters, модели, метрики и CLI.</p>
+
+    <h2 id="start">Быстрый старт</h2>
+    <pre><code>cargo run -p assistant-cli -- models install
+cargo run -p assistant-daemon
+cargo run -p assistant-cli -- status</code></pre>
+    <p>Конфигурация, модели и логи по умолчанию находятся в
+      <code>%LOCALAPPDATA%\VoiceAssistantCore</code>. Daemon запускается и без
+      модели; установка доступна после запуска через IPC.</p>
+
+    <h2 id="architecture">Архитектура</h2>
+    <pre><code>GUI / CLI
+    → Named Pipe protocol v1
+    → Runtime task
+    → Audio / KWS / VAD / STT / Commands</code></pre>
+    <p>Audio callback выполняет только преобразование кадров и неблокирующую
+      запись в bounded-очередь. KWS, STT, файловые операции и handlers работают
+      вне callback. Текущие состояние и health читаются без ожидания inference.</p>
+
+    <h2 id="api">Публичный Rust API v1</h2>
+    <table>
+      <tr><th>Граница</th><th>Типы</th></tr>
+      <tr><td>Extensions</td><td><code>CommandHandler</code>, <code>HandlerSchema</code>, <code>HandlerRegistry</code></td></tr>
+      <tr><td>Embedding</td><td><code>RuntimeComponents</code>, <code>RuntimeHandle</code>, <code>RuntimeTask</code>, <code>spawn_runtime_service</code></td></tr>
+      <tr><td>IPC client</td><td><code>CoreIpcClient</code>, <code>EventSubscription</code>, request/response/envelope/error types</td></tr>
+      <tr><td>Domain</td><td>config, states, events, health, model status, typed errors and metrics</td></tr>
+    </table>
+    <p><code>CORE_API_VERSION = 1</code>. Ломающие Rust-изменения требуют новой
+      major-версии API. Несовместимое изменение wire-формата требует новой
+      <code>PROTOCOL_VERSION</code>.</p>
+
+    <h2 id="extension">Extension API команд</h2>
+    <pre><code>#[async_trait]
+impl CommandHandler for Mute {
+    fn schema(&amp;self) -> HandlerSchema {
+        HandlerSchema::new(
+            "mute",
+            std::iter::empty::&lt;&amp;str&gt;(),
+            std::iter::empty::&lt;&amp;str&gt;(),
+        )
+    }
+
+    async fn execute(&amp;self, parameters: &amp;CommandParameters)
+        -> Result&lt;CommandResult, CoreError&gt; {
+        Ok(CommandResult { message: "muted".into() })
+    }
+}
+
+let mut handlers = HandlerRegistry::new();
+handlers.register(Arc::new(Mute))?;</code></pre>
+    <p>Schema задаёт имя и allowlist параметров. Registry отклоняет дубликаты,
+      неизвестные, пропущенные и лишние параметры до запуска runtime.
+      Распознанный текст не передаётся в shell.</p>
+
+    <h2 id="ipc">IPC protocol v1</h2>
+    <p><code>\\.\pipe\voice-assistant-core</code>, local-only DACL, один daemon,
+      JSON envelope с <code>protocol_version</code> и лимитом 1 МиБ.</p>
+    <p>API включает health/status/config/metrics/audio devices, validate/apply
+      config, status/install/cancel/verify model, suspend/resume,
+      confirm/cancel, events и shutdown. Подтверждение адресуется одноразовым
+      <code>confirmation_id</code>. Ошибки имеют типизированный
+      <code>IpcErrorCode</code>.</p>
+
+    <h2 id="config">Конфигурация</h2>
+    <p>Текущая schema — 2; schema 1 мигрируется автоматически. Изменение
+      проверяется вместе с зарегистрированными handlers и сохраняется атомарно.
+      Настройки pipe применяются после перезапуска.</p>
+    <div class="note"><code>policy.confirmations_enabled = false</code> полностью
+      отключает подтверждения, включая high-risk команды. Это явное снижение
+      защиты.</div>
+
+    <h2 id="models">Модели</h2>
+    <p>Установка использует фиксированный commit SHA, allowlist файлов и
+      SHA-256 manifest. Прогресс и отмена доступны через IPC. Активация
+      атомарна; неудачная переустановка не уничтожает прежнюю ревизию.</p>
+
+    <h2 id="diagnostics">Диагностика и готовность</h2>
+    <pre><code>cargo run -p assistant-cli -- evaluate command.wav
+cargo run -p assistant-cli -- soak --seconds 3600
+cargo test --workspace --all-features
+$env:RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --all-features --no-deps</code></pre>
+    <p><code>cargo test --workspace --all-features</code> включает автоматический
+      процессный E2E-тест: запускает настоящий <code>assistant-daemon</code>,
+      подключает <code>CoreIpcClient</code>, проверяет health, suspend/resume и
+      удалённый shutdown. MSVC-сборка всего workspace использует единый статический
+      CRT, совместимый со статической Windows-библиотекой <code>sherpa-onnx</code>.</p>
+    <p>Метрики содержат переполнение и глубину очередей, reconnect, задержки
+      KWS/STT/handler, CPU time и working set. Реальный WAV не хранится в Git;
+      повторяемый ignored-тест описан в README.</p>
+  </main>
+</div>
+</body>
+</html>

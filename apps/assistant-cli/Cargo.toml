@@ -1,0 +1,18 @@
+[package]
+name = "assistant-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["stt-sherpa-onnx"]
+stt-sherpa-onnx = ["assistant-core/stt-sherpa-onnx"]
+
+[dependencies]
+anyhow.workspace = true
+assistant-core = { path = "../../crates/assistant-core" }
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

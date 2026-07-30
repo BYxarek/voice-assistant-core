@@ -1,0 +1,18 @@
+name: Предложение
+description: Предложить ограниченное улучшение ядра
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    attributes:
+      label: Задача
+      description: Какую реальную проблему решает изменение?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Минимальное решение
+      description: Какой самый маленький результат будет полезен?
+    validations:
+      required: true
+

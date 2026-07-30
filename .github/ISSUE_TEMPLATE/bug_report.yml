@@ -1,0 +1,27 @@
+name: Ошибка
+description: Сообщить о воспроизводимой проблеме
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    attributes:
+      label: Что произошло?
+      description: Ожидаемое и фактическое поведение.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Windows и версия сборки
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Воспроизведение
+      description: Команды и минимальные шаги без секретов и приватного аудио.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Логи
+      description: Удалите токены, транскрипты и персональные данные.
+

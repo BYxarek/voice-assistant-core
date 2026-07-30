@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Полный справочник Voice Assistant Core: Rust API, IPC, расширения, конфигурация, модели и runtime">
+  <title>Voice Assistant Core · Полный API</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070d16;--surface:#0e1724;--surface-2:#121e2e;--surface-3:#17263a;--text:#edf5ff;--muted:#9dafc5;--line:#263a51;--accent:#63d4ff;--accent-2:#8d82ff;--good:#67dfa8;--warn:#ffc96b;--shadow:0 24px 70px rgba(0,0,0,.35);--sidebar:310px}
+    *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.68 "Segoe UI",Inter,system-ui,sans-serif}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.skip{position:fixed;left:16px;top:-60px;z-index:100;padding:10px 14px;background:var(--accent);color:#06101a;border-radius:8px}.skip:focus{top:12px}
+    .progress{position:fixed;inset:0 auto auto 0;z-index:80;height:3px;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2))}.layout{display:grid;grid-template-columns:var(--sidebar) minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:28px 22px;border-right:1px solid var(--line);background:#09111cea;backdrop-filter:blur(16px);overflow:auto}.brand{display:flex;gap:12px;align-items:center;margin-bottom:24px;color:var(--text);font-weight:750;line-height:1.25}.brand:hover{text-decoration:none}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:var(--accent);color:#06101a;font-weight:900;box-shadow:0 10px 28px rgba(99,212,255,.18)}.version{display:block;color:var(--good);font-size:12px;font-weight:650;letter-spacing:.09em;text-transform:uppercase}.search-wrap{position:relative;margin-bottom:17px}.search{width:100%;padding:11px 38px 11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);outline:none}.search:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,212,255,.1)}.search-key{position:absolute;right:10px;top:9px;color:var(--muted);font-size:12px;border:1px solid var(--line);border-radius:5px;padding:1px 5px}.nav-title{margin:18px 8px 7px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}.nav a{display:grid;grid-template-columns:30px 1fr;gap:6px;padding:7px 8px;border-radius:8px;color:var(--muted);font-size:13px;line-height:1.35}.nav a span{color:#61758e;font-variant-numeric:tabular-nums}.nav a:hover,.nav a.active{background:var(--surface-2);color:var(--text);text-decoration:none}.nav a.active span{color:var(--accent)}.side-links{display:flex;gap:14px;margin:22px 8px;font-size:13px}
+    main{min-width:0}.content{width:min(1040px,calc(100% - 48px));margin:0 auto;padding:56px 0 110px}.hero{position:relative;overflow:hidden;padding:50px 52px;margin-bottom:24px;border:1px solid var(--line);border-radius:24px;background:var(--surface);box-shadow:var(--shadow)}.hero:after{content:"";position:absolute;right:-70px;top:-110px;width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(99,212,255,.15),transparent 68%);pointer-events:none}.eyebrow{color:var(--good);font-size:12px;font-weight:750;letter-spacing:.15em;text-transform:uppercase}.hero h1{max-width:790px;margin:13px 0 16px;font-size:clamp(38px,6vw,68px);line-height:1.02;letter-spacing:-.045em}.hero p{max-width:760px;margin:0;color:var(--muted);font-size:19px}.badges{display:flex;flex-wrap:wrap;gap:10px;margin-top:25px}.badge{padding:7px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:13px}.badge strong{color:var(--accent)}
+    .doc-section{margin-top:18px;padding:34px 38px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}.section-kicker{color:var(--accent);font-size:11px;font-weight:750;letter-spacing:.13em;text-transform:uppercase}.doc-section h2{margin:5px 0 20px;font-size:30px;line-height:1.2;letter-spacing:-.025em}.doc-section h3{margin:31px 0 10px;font-size:21px}.doc-section p{color:#ced9e7}.doc-section li{margin:6px 0;color:#ced9e7}.doc-section code:not(pre code){padding:2px 6px;border:1px solid #2c435d;border-radius:6px;background:#101d2c;color:#bceeff;font:13px/1.5 "Cascadia Code",Consolas,monospace}.table-wrap{overflow:auto;margin:20px 0;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;background:#0b1420;font-size:14px}th,td{padding:12px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{position:sticky;top:0;background:var(--surface-3);color:var(--accent);font-weight:700}tr:last-child td{border-bottom:0}tbody tr:hover{background:rgba(99,212,255,.035)}
+    .code-block{margin:20px 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#050a11}.code-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);background:#101a28;color:var(--muted);font:12px "Cascadia Code",Consolas,monospace}.copy{padding:5px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--text);cursor:pointer}.copy:hover{border-color:var(--accent)}pre{margin:0;padding:18px;overflow:auto;color:#dcecff;font:13px/1.65 "Cascadia Code",Consolas,monospace}.empty{display:none;margin:32px 0;padding:24px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);text-align:center}.backtop{position:fixed;right:22px;bottom:22px;display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);color:var(--text);box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.backtop.visible{opacity:1;pointer-events:auto}.hidden{display:none!important}
+    @media(max-width:980px){:root{--sidebar:250px}.content{width:min(100% - 32px,900px)}.hero{padding:38px}.doc-section{padding:28px}}
+    @media(max-width:760px){.layout{display:block}.sidebar{position:relative;height:auto;padding:18px;border-right:0;border-bottom:1px solid var(--line)}.nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:260px;overflow:auto}.content{width:calc(100% - 24px);padding-top:20px}.hero{padding:28px 22px;border-radius:18px}.hero h1{font-size:38px}.hero p{font-size:17px}.doc-section{padding:24px 18px}.doc-section h2{font-size:26px}.backtop{right:12px;bottom:12px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.backtop{transition:none}}
+    @media print{.sidebar,.progress,.backtop,.copy{display:none!important}.layout{display:block}.content{width:100%;padding:0}.hero,.doc-section{box-shadow:none;break-inside:avoid;border-color:#aaa;background:#fff;color:#111}.doc-section p,.doc-section li,.hero p{color:#222}body{background:#fff;color:#111}a{color:#005a80}}
+  </style>
+</head>
+<body>
+<a class="skip" href="#main">К содержанию</a><div class="progress" id="progress"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.0.0 · Public API v1</span></span></a>
+    <div class="search-wrap"><label class="sr-only" for="search">Поиск</label><input id="search" class="search" type="search" placeholder="Поиск по API…" autocomplete="off"><span class="search-key">/</span></div>
+    <div class="nav-title">Содержание</div><nav class="nav" aria-label="Разделы API"><a href="#section-1" data-nav="section-1"><span>01</span>Версии, Cargo features и платформы</a>
+<a href="#section-2" data-nav="section-2"><span>02</span>Публичные модули</a>
+<a href="#section-3" data-nav="section-3"><span>03</span>Рекомендуемое встраивание runtime</a>
+<a href="#section-4" data-nav="section-4"><span>04</span>Состояния</a>
+<a href="#section-5" data-nav="section-5"><span>05</span>События</a>
+<a href="#section-6" data-nav="section-6"><span>06</span>Extension API команд</a>
+<a href="#section-7" data-nav="section-7"><span>07</span>Адаптеры STT, VAD и KWS</a>
+<a href="#section-8" data-nav="section-8"><span>08</span>Audio API</a>
+<a href="#section-9" data-nav="section-9"><span>09</span>Конфигурация schema v2</a>
+<a href="#section-10" data-nav="section-10"><span>10</span>Model API</a>
+<a href="#section-11" data-nav="section-11"><span>11</span>IPC wire protocol v1</a>
+<a href="#section-12" data-nav="section-12"><span>12</span>Ошибки</a>
+<a href="#section-13" data-nav="section-13"><span>13</span>Метрики</a>
+<a href="#section-14" data-nav="section-14"><span>14</span>Daemon</a>
+<a href="#section-15" data-nav="section-15"><span>15</span>CLI</a>
+<a href="#section-16" data-nav="section-16"><span>16</span>Готовность приложения</a>
+<a href="#section-17" data-nav="section-17"><span>17</span>Проверки</a></nav>
+    <div class="side-links"><a href="index.html">Обзор</a><a href="../target/doc/assistant_core/index.html">Rustdoc</a></div>
+  </aside>
+  <main id="main"><div class="content">
+    <header class="hero searchable"><div class="eyebrow">Developer reference · 17 разделов</div><h1>Полный справочник API</h1><p>Rust embedding, расширения команд, runtime, IPC, конфигурация, модели, аудио и всё необходимое для создания приложения поверх ядра.</p><div class="badges"><span class="badge"><strong>Core API</strong> v1</span><span class="badge"><strong>IPC</strong> v1</span><span class="badge"><strong>Config</strong> schema 2</span></div></header>
+    <div id="empty" class="empty">Ничего не найдено. Попробуйте имя типа, метода или IPC-запроса.</div>
+    <p>Этот документ описывает весь публичный контракт <code>assistant-core</code> v0.1: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
+<section id="section-1" class="doc-section searchable"><div class="section-kicker">Раздел 1</div><h2>Версии, Cargo features и платформы</h2>
+<ul>
+<li><code>CORE_API_VERSION = 1</code> — версия публичного Rust extension/embedding API.</li>
+<li><code>PROTOCOL_VERSION = 1</code> — несовместимая граница wire-протокола IPC.</li>
+<li><code>CURRENT_CONFIG_VERSION = 2</code> — схема TOML и <code>CoreConfig</code>.</li>
+<li>Основная платформа — Windows 10/11 x64, MSRV — Rust 1.97.</li>
+<li>default feature <code>model-source-huggingface</code> включает установку модели.</li>
+<li>feature <code>stt-sherpa-onnx</code> включает <code>SherpaOnnxRecognizer</code> и wake-word API.</li>
+</ul>
+<p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>. Добавление необязательного поля Serde или нового запроса, который старый клиент не отправляет, допускается внутри protocol v1.</p>
+</section>
+<section id="section-2" class="doc-section searchable"><div class="section-kicker">Раздел 2</div><h2>Публичные модули</h2>
+<div class="table-wrap"><table><thead><tr><th>Модуль</th><th>Назначение</th></tr></thead><tbody><tr><td><code>audio</code></td><td>устройства CPAL, bounded input, WAV, downmix и resampling</td></tr><tr><td><code>commands</code></td><td>нормализация, exact matching, handler schema и registry</td></tr><tr><td><code>config</code></td><td>schema v2, миграция, валидация, AppData и atomic save</td></tr><tr><td><code>domain</code></td><td>состояния, события, запросы STT, результаты и ошибки</td></tr><tr><td><code>ipc</code></td><td>JSON envelope и Windows Named Pipe transport/client</td></tr><tr><td><code>metrics</code></td><td>lock-free counters, latency, CPU time и working set</td></tr><tr><td><code>models</code></td><td>pinned download, manifest, SHA-256, cancel и atomic activation</td></tr><tr><td><code>runtime</code></td><td>синхронная машина состояний и обработка одной команды</td></tr><tr><td><code>service</code></td><td>рекомендуемый dedicated task и cloneable handle</td></tr><tr><td><code>signal</code></td><td>VAD, pre-roll ring и bounded command collector</td></tr><tr><td><code>stt</code></td><td>persistent sherpa-onnx worker</td></tr><tr><td><code>wakeword</code></td><td>streaming open-vocabulary KWS</td></tr></tbody></table></div>
+<p>Корень crate повторно экспортирует основной стабильный application API: доменные типы, <code>CoreConfig</code>, <code>AppPaths</code>, handler API, runtime service, метрики и Windows IPC client. Low-level типы доступны через соответствующие модули.</p>
+</section>
+<section id="section-3" class="doc-section searchable"><div class="section-kicker">Раздел 3</div><h2>Рекомендуемое встраивание runtime</h2>
+<p>Приложение создаёт:</p>
+<ol>
+<li>проверенный <code>CoreConfig</code>;</li>
+<li><code>Arc&lt;dyn SpeechRecognizer&gt;</code>;</li>
+<li><code>CommandRegistry</code>;</li>
+<li><code>HandlerRegistry</code> как <code>Arc&lt;dyn CommandExecutor&gt;</code>;</li>
+<li><code>Runtime</code>, затем <code>spawn_runtime_service</code>.</li>
+</ol>
+<div class="code-block"><div class="code-head"><span>rust</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-rust">use std::{sync::Arc, time::Duration};
+use assistant_core::{
+    CommandRegistry, CoreConfig, CoreMetrics, MockRecognizer, Runtime,
+    RuntimeComponents, builtin_handlers, spawn_runtime_service,
+};
+
+# async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+let config = CoreConfig::bundled_example()?;
+let handlers = builtin_handlers(&amp;config.commands)?;
+config.validate_with_handlers(&amp;handlers)?;
+
+let metrics = CoreMetrics::default();
+let runtime = Runtime::new(
+    Arc::new(MockRecognizer { text: &quot;открой блокнот&quot;.into() }),
+    CommandRegistry::new(config.commands.clone(), config.matching.normalize_yo),
+    Arc::new(handlers),
+    config.wake_word.keyword.clone(),
+    config.policy.clone(),
+    Duration::from_millis(config.inference.timeout_ms),
+    Duration::from_millis(config.wake_word.cooldown_ms),
+    metrics,
+);
+let (handle, task) = spawn_runtime_service(runtime, 32)?;
+handle.begin_capture().await?;
+// После завершения VAD: handle.captured_audio(request).await?;
+handle.shutdown().await?;
+task.join().await?;
+# Ok(()) }</code></pre></div>
+<p><code>RuntimeHandle</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Метод</th><th>Контракт</th></tr></thead><tbody><tr><td><code>state</code></td><td>немедленно читает последнее состояние, не ждёт STT</td></tr><tr><td><code>watch_state</code></td><td><code>watch::Receiver</code> с последним состоянием</td></tr><tr><td><code>subscribe</code></td><td>ordered broadcast событий; lag означает потерю старых событий</td></tr><tr><td><code>event_sender</code></td><td>sender для транспорта подписок</td></tr><tr><td><code>shutdown_receiver</code></td><td>процессный сигнал завершения</td></tr><tr><td><code>begin_capture</code></td><td>публикует speech → wake word → capturing</td></tr><tr><td><code>captured_audio</code></td><td>передаёт законченный mono command audio в STT</td></tr><tr><td><code>suspend</code> / <code>resume</code></td><td>пауза и возобновление listening</td></tr><tr><td><code>confirm</code> / <code>cancel</code></td><td>принимает только актуальный одноразовый <code>confirmation_id</code></td></tr><tr><td><code>reconfigure</code></td><td>заменяет компоненты только из idle/suspended</td></tr><tr><td><code>report_recoverable</code></td><td>неблокирующий отчёт об ошибке адаптера</td></tr><tr><td><code>publish_event</code></td><td>неблокирующая публикация внешнего lifecycle event</td></tr><tr><td><code>shutdown</code></td><td>graceful shutdown runtime</td></tr><tr><td><code>signal_shutdown</code></td><td>немедленно будит lifecycle daemon</td></tr></tbody></table></div>
+<p><code>RuntimeTask::join</code> ждёт завершения, <code>abort_handle</code> применяется только как последний bounded shutdown fallback. Capacity <code>spawn_runtime_service</code> должна быть больше нуля.</p>
+<p><code>Runtime</code> доступен напрямую для тестов и однопоточного embedding. В этом случае вызывающая сторона сама должна вызывать <code>expire_confirmation</code>, <code>complete_cooldown</code> и не выполнять методы параллельно.</p>
+</section>
+<section id="section-4" class="doc-section searchable"><div class="section-kicker">Раздел 4</div><h2>Состояния</h2>
+<div class="table-wrap"><table><thead><tr><th><code>AssistantState</code></th><th>Значение</th></tr></thead><tbody><tr><td><code>Starting</code></td><td>создаются адаптеры</td></tr><tr><td><code>IdleListening</code></td><td>готов к wake word</td></tr><tr><td><code>SpeechDetected</code></td><td>обнаружена речь</td></tr><tr><td><code>WakeWordDetected</code></td><td>принят keyword</td></tr><tr><td><code>CapturingCommand</code></td><td>VAD собирает команду</td></tr><tr><td><code>Transcribing</code></td><td>запрос находится в STT</td></tr><tr><td><code>MatchingCommand</code></td><td>exact matching transcript</td></tr><tr><td><code>AwaitingConfirmation</code></td><td>ожидается одноразовый token</td></tr><tr><td><code>ExecutingCommand</code></td><td>выполняется typed handler</td></tr><tr><td><code>Cooldown</code></td><td>wake word временно заблокирован</td></tr><tr><td><code>Suspended</code></td><td>listening отключён приложением</td></tr><tr><td><code>Recovering</code></td><td>компонент восстанавливается</td></tr><tr><td><code>Faulted</code></td><td>автоматическое восстановление невозможно</td></tr><tr><td><code>ShuttingDown</code></td><td>завершение</td></tr></tbody></table></div>
+<p><code>AssistantState::can_transition_to</code> — нормативная таблица переходов. Shutdown разрешён из любого состояния, кроме уже завершённого. Сбой STT/handler публикует <code>RecoverableError</code> и возвращает runtime к listening, если переход допустим.</p>
+</section>
+<section id="section-5" class="doc-section searchable"><div class="section-kicker">Раздел 5</div><h2>События</h2>
+<p><code>AssistantEvent</code> сериализуется с полем <code>type</code> в <code>snake_case</code>:</p>
+<ul>
+<li><code>state_changed { previous, current }</code>;</li>
+<li><code>transcript_ready { text, confidence }</code>;</li>
+<li><code>command_matched { command_id }</code>;</li>
+<li><code>command_started { command_id }</code>;</li>
+<li><code>confirmation_required { command_id, confirmation_id }</code>;</li>
+<li><code>confirmation_cancelled { command_id, confirmation_id, reason }</code>;</li>
+<li><code>command_finished { command_id, result }</code>;</li>
+<li><code>command_not_matched { text }</code>;</li>
+<li><code>recoverable_error { component, message }</code>;</li>
+<li><code>model_install_progress { completed_files, total_files, file }</code>;</li>
+<li><code>model_ready { revision }</code>.</li>
+</ul>
+<p>Причины отмены: <code>user</code>, <code>expired</code>, <code>recovery</code>, <code>suspended</code>, <code>reconfigured</code>. События предназначены для UI и наблюдения; <code>GetStatus</code>, <code>GetHealth</code>, <code>GetModelStatus</code> и <code>GetMetrics</code> являются источником текущего durable state после переподключения.</p>
+</section>
+<section id="section-6" class="doc-section searchable"><div class="section-kicker">Раздел 6</div><h2>Extension API команд</h2>
+<p>Новая команда не требует изменения ядра. Приложение реализует <code>CommandHandler</code>, объявляет <code>HandlerSchema</code>, регистрирует handler и добавляет <code>CommandConfig</code>.</p>
+<div class="code-block"><div class="code-head"><span>rust</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-rust">use std::sync::Arc;
+use async_trait::async_trait;
+use assistant_core::{
+    CommandHandler, CommandParameters, CommandResult, CoreError,
+    HandlerRegistry, HandlerSchema,
+};
+
+struct SetVolume;
+
+#[async_trait]
+impl CommandHandler for SetVolume {
+    fn schema(&amp;self) -&gt; HandlerSchema {
+        HandlerSchema::new(&quot;set_volume&quot;, [&quot;level&quot;], [&quot;device&quot;])
+    }
+
+    async fn execute(
+        &amp;self,
+        parameters: &amp;CommandParameters,
+    ) -&gt; Result&lt;CommandResult, CoreError&gt; {
+        let level: u8 = parameters[&quot;level&quot;]
+            .parse()
+            .map_err(|_| CoreError::Command(&quot;level must be 0..=100&quot;.into()))?;
+        if level &gt; 100 {
+            return Err(CoreError::Command(&quot;level must be 0..=100&quot;.into()));
+        }
+        Ok(CommandResult { message: format!(&quot;volume={level}&quot;) })
+    }
+}
+
+let mut handlers = HandlerRegistry::new();
+handlers.register(Arc::new(SetVolume))?;
+# Ok::&lt;(), CoreError&gt;(())</code></pre></div>
+<p>Правила:</p>
+<ul>
+<li>handler name непустой и содержит только ASCII lowercase и <code>_</code>;</li>
+<li>имена уникальны;</li>
+<li>required/optional parameter sets не пересекаются;</li>
+<li>неизвестные, пустые и отсутствующие параметры отклоняются;</li>
+<li>внутренние параметры с <code>_</code> не входят в публичную schema;</li>
+<li>runtime добавляет <code>_command_id</code>, чтобы built-in allowlist мог связать вызов с</li>
+<p>проверенной командой;</p>
+<li>каждый handler ограничен <code>CommandConfig.timeout_ms</code>;</li>
+<li>распознанный текст не передаётся handler и никогда не исполняется как shell.</li>
+</ul>
+<p><code>builtin_handlers</code> возвращает stock registry с <code>launch_app</code>. <code>LaunchAppHandler</code> запускает только executable, связанный с enabled command ID. <code>LaunchAppExecutor</code> и общий <code>CommandExecutor</code> сохранены для low-level embedding; для новых расширений используется <code>CommandHandler</code>.</p>
+<p>Matching выполняется после <code>normalize</code>: lowercase, удаление пунктуации, схлопывание пробелов и опциональная замена <code>ё</code> → <code>е</code>. Сопоставление строгое: полная фраза либо полная фраза после известного wake-word prefix.</p>
+</section>
+<section id="section-7" class="doc-section searchable"><div class="section-kicker">Раздел 7</div><h2>Адаптеры STT, VAD и KWS</h2>
+<p><code>SpeechRecognizer::transcribe(TranscriptionRequest)</code> принимает owned mono <code>Vec&lt;f32&gt;</code> и <code>sample_rate</code>, возвращает <code>Transcript { text, confidence }</code>. Реализация не должна блокировать audio callback. Тяжёлый native inference работает в worker или <code>spawn_blocking</code>.</p>
+<p><code>SherpaOnnxRecognizer::new(model_dir, threads, queue_capacity, metrics)</code>:</p>
+<ul>
+<li>проверяет обязательные ONNX/tokens файлы;</li>
+<li>создаёт один persistent native worker;</li>
+<li>использует bounded queue;</li>
+<li>отклоняет пустые, non-finite samples и нулевой sample rate;</li>
+<li>возвращает <code>CoreError::Recognition</code> при остановке worker.</li>
+</ul>
+<p><code>UnavailableRecognizer</code> позволяет daemon стартовать без модели. <code>MockRecognizer</code> предназначен для тестов.</p>
+<p><code>VoiceActivityDetector</code> имеет <code>reset</code> и <code>process</code>. <code>EnergyVad</code> сравнивает RMS с threshold. <code>AudioRingBuffer</code> хранит bounded pre-roll. <code>CommandCollector</code> завершает utterance по trailing silence либо hard maximum. <code>CommandAudioPipeline&lt;V&gt;</code> объединяет pre-roll, wake-word gate, VAD и collector; <code>push</code> возвращает <code>Some(Vec&lt;f32&gt;)</code> только для законченной команды.</p>
+<p><code>SherpaWakeWordDetector::new</code> загружает модель и кодирует keyword. <code>process</code> принимает streaming mono frame и возвращает <code>WakeWordDetection { keyword, start_time }</code>; <code>reset</code> очищает decoder state.</p>
+</section>
+<section id="section-8" class="doc-section searchable"><div class="section-kicker">Раздел 8</div><h2>Audio API</h2>
+<p><code>list_input_devices</code> возвращает <code>AudioDeviceInfo { id, name, is_default }</code>. <code>AudioInput::open(device_id, queue_capacity_frames, metrics)</code> открывает default/выбранный input и создаёт bounded callback queue.</p>
+<ul>
+<li><code>source_rate</code> — нативная частота устройства;</li>
+<li><code>recv_timeout</code> — <code>Ok(Some(block))</code>, <code>Ok(None)</code> по timeout либо typed error;</li>
+<li>полный callback queue увеличивает <code>audio_frames_dropped</code>;</li>
+<li>callback не делает inference, файловый I/O и тяжёлое логирование.</li>
+</ul>
+<p>Утилиты:</p>
+<ul>
+<li><code>record_wav</code> записывает mono WAV с worker-side resampling;</li>
+<li><code>read_wav_mono</code> читает PCM/float WAV и downmix;</li>
+<li><code>resample_linear</code> преобразует mono sample rate. Это простой streaming-block</li>
+<p>resampler; заменять его следует только после измеримого KWS/STT regression.</p>
+</ul>
+<p><code>AudioError</code>: <code>Device</code>, <code>Stream</code>, <code>Disconnected</code>, <code>Wav</code>. Канонический внутренний формат — finite <code>f32</code>, mono, 16 кГц.</p>
+</section>
+<section id="section-9" class="doc-section searchable"><div class="section-kicker">Раздел 9</div><h2>Конфигурация schema v2</h2>
+<p>Неизвестные TOML-поля отклоняются. <code>CoreConfig::load</code> и <code>from_toml_str</code> мигрируют schema 1 → 2, затем валидируют. <code>save_atomic</code> пишет временный файл в том же каталоге и заменяет destination с write-through. <code>validate_with_handlers</code> дополнительно проверяет handler schema.</p>
+<div class="table-wrap"><table><thead><tr><th>Поле</th><th>Default</th><th>Ограничение</th></tr></thead><tbody><tr><td><code>audio.device_id</code></td><td><code>default</code></td><td>backend ID</td></tr><tr><td><code>audio.target_sample_rate</code></td><td>16000</td><td>только 16000</td></tr><tr><td><code>audio.channels</code></td><td>1</td><td>только 1</td></tr><tr><td><code>audio.frame_ms</code></td><td>20</td><td>5..=100</td></tr><tr><td><code>audio.pre_roll_ms</code></td><td>900</td><td>0..=5000</td></tr><tr><td><code>audio.queue_capacity_frames</code></td><td>250</td><td>1..=4096</td></tr><tr><td><code>audio.vad_threshold</code></td><td>0.015</td><td>finite 0..=1</td></tr><tr><td><code>audio.command_min_ms</code></td><td>300</td><td>≥ frame, ≤ max</td></tr><tr><td><code>audio.command_max_ms</code></td><td>10000</td><td>250..=60000</td></tr><tr><td><code>audio.trailing_silence_ms</code></td><td>700</td><td>≥ frame, ≤ command max</td></tr><tr><td><code>audio.reconnect_delay_ms</code></td><td>1000</td><td>100..=60000</td></tr><tr><td><code>audio.stall_timeout_ms</code></td><td>3000</td><td>500..=60000</td></tr><tr><td><code>matching.normalize_yo</code></td><td>true</td><td>bool</td></tr><tr><td><code>wake_word.keyword</code></td><td><code>ассистент</code></td><td>непустой</td></tr><tr><td><code>wake_word.score</code></td><td>1.5</td><td>finite, &gt;0 и ≤100</td></tr><tr><td><code>wake_word.threshold</code></td><td>0.35</td><td>finite 0..=1</td></tr><tr><td><code>wake_word.cooldown_ms</code></td><td>1200</td><td>0..=60000</td></tr><tr><td><code>inference.threads</code></td><td>4</td><td>1..=64</td></tr><tr><td><code>inference.queue_capacity</code></td><td>2</td><td>1..=64</td></tr><tr><td><code>inference.timeout_ms</code></td><td>30000</td><td>100..=300000</td></tr><tr><td><code>policy.confirmations_enabled</code></td><td>true</td><td>false отключает все confirmation</td></tr><tr><td><code>policy.confirmation_timeout_ms</code></td><td>15000</td><td>100..=300000</td></tr><tr><td><code>ipc.pipe_name</code></td><td><code>voice-assistant-core</code></td><td>ASCII alnum или <code>-</code></td></tr><tr><td><code>ipc.io_timeout_ms</code></td><td>30000</td><td>100..=300000</td></tr></tbody></table></div>
+<p>Команды требуют уникальный непустой <code>id</code>, хотя бы одну непустую после нормализации phrase, непустой handler и timeout 1..=300000. Нормализованные phrases не могут пересекаться между командами.</p>
+<p><code>RiskLevel</code>: <code>low</code>, <code>medium</code>, <code>high</code>. При включённой policy подтверждение нужно, если <code>requires_confirmation = true</code> или risk <code>high</code>. При <code>confirmations_enabled = false</code> подтверждения полностью отключены.</p>
+<p><code>AppPaths::discover</code> использует:</p>
+<div class="code-block"><div class="code-head"><span>text</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-text">%LOCALAPPDATA%\VoiceAssistantCore\
+├── assistant.toml
+├── models\
+└── logs\</code></pre></div>
+<p><code>ensure_directories</code> создаёт каталоги. Параметры можно переопределить аргументами daemon/CLI. Изменение IPC pipe во время <code>ApplyConfig</code> требует перезапуска.</p>
+</section>
+<section id="section-10" class="doc-section searchable"><div class="section-kicker">Раздел 10</div><h2>Model API</h2>
+<p>Stock source:</p>
+<ul>
+<li>repo <code>alphacep/vosk-model-streaming-ru</code>;</li>
+<li>revision <code>83bbf6f40059480e96251be8aed3d32bc7c80c33</code>;</li>
+<li>runtime <code>sherpa-onnx</code>, language <code>ru</code>, 16 кГц, Apache-2.0.</li>
+</ul>
+<p><code>ModelManager</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Метод</th><th>Результат</th></tr></thead><tbody><tr><td><code>new(root)</code></td><td>создаёт manager без I/O</td></tr><tr><td><code>install_alphacep_streaming_ru</code></td><td>устанавливает либо возвращает verified revision</td></tr><tr><td><code>install_alphacep_streaming_ru_with_control</code></td><td>то же с <code>AtomicBool</code> cancel и progress callback</td></tr><tr><td><code>resolve_alphacep_streaming_ru</code></td><td>offline resolve + verify</td></tr><tr><td><code>verify(directory)</code></td><td>проверяет metadata, safe relative paths, sizes и SHA-256</td></tr></tbody></table></div>
+<p>Установка копирует только <code>ALPHACEP_STREAMING_RU_FILES</code>, создаёт <code>ModelManifest</code>, проверяет temporary directory и активирует rename. Повреждённая установка помещается в quarantine и восстанавливается при неудачной замене. Cancel проверяется между файлами и до activation. Remote scripts не выполняются.</p>
+<p><code>ModelStatus</code>: <code>missing</code>, <code>installing</code>, <code>ready</code>, <code>failed</code>, <code>cancelled</code>. <code>ModelError</code>: <code>Io</code>, <code>Hub</code>, <code>Manifest</code>, <code>Verification</code>, <code>Cancelled</code>.</p>
+</section>
+<section id="section-11" class="doc-section searchable"><div class="section-kicker">Раздел 11</div><h2>IPC wire protocol v1</h2>
+<p>Transport — <code>\\.\pipe\&lt;pipe_name&gt;</code>. Сервер:</p>
+<ul>
+<li>запрещает remote clients;</li>
+<li>применяет DACL owner/SYSTEM/Administrators;</li>
+<li>использует Named Pipe first-instance и process-lifetime named mutex;</li>
+<li>допускает до 16 concurrent pipe instances;</li>
+<li>ограничивает frame до 1 МиБ;</li>
+<li>применяет timeout к чтению и записи.</li>
+</ul>
+<p>Frame:</p>
+<div class="code-block"><div class="code-head"><span>text</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-text">u32 little-endian JSON length
+UTF-8 JSON Envelope</code></pre></div>
+<div class="code-block"><div class="code-head"><span>json</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-json">{
+  &quot;protocol_version&quot;: 1,
+  &quot;request_id&quot;: &quot;ui-42&quot;,
+  &quot;payload&quot;: { &quot;type&quot;: &quot;get_health&quot; }
+}</code></pre></div>
+<div class="table-wrap"><table><thead><tr><th>Request</th><th>Успешный response</th></tr></thead><tbody><tr><td><code>get_status</code></td><td><code>status { state }</code></td></tr><tr><td><code>get_health</code></td><td><code>health { health }</code></td></tr><tr><td><code>get_config</code></td><td><code>config { config }</code></td></tr><tr><td><code>validate_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>apply_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>list_audio_devices</code></td><td><code>audio_devices { devices }</code></td></tr><tr><td><code>get_metrics</code></td><td><code>metrics { metrics }</code></td></tr><tr><td><code>get_model_status</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>install_model</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_model_install</code></td><td><code>accepted</code></td></tr><tr><td><code>verify_model</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>suspend_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>resume_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>confirm_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>subscribe_events</code></td><td><code>accepted</code>, затем только <code>event { event }</code></td></tr><tr><td><code>shutdown</code></td><td><code>accepted</code></td></tr></tbody></table></div>
+<p>Ошибка: <code>error { code, message }</code>. Коды: <code>invalid_request</code>, <code>protocol_version</code>, <code>configuration</code>, <code>audio</code>, <code>model</code>, <code>runtime_busy</code>, <code>confirmation</code>, <code>internal</code>.</p>
+<div class="code-block"><div class="code-head"><span>rust</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-rust">use std::time::Duration;
+use assistant_core::{CoreIpcClient, CoreRequest, CoreResponse};
+
+# async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+let client = CoreIpcClient::new(&quot;voice-assistant-core&quot;, Duration::from_secs(5))?;
+if let CoreResponse::Health { health } =
+    client.request(CoreRequest::GetHealth).await?
+{
+    println!(&quot;{health:?}&quot;);
+}
+let mut events = client.subscribe().await?;
+while let Ok(event) = events.next().await {
+    println!(&quot;{event:?}&quot;);
+}
+# Ok(()) }</code></pre></div>
+<p><code>CoreIpcClient::request</code> использует новое соединение и повторяет connect до timeout. <code>subscribe</code> открывает отдельное event-only соединение. <code>IpcClientError</code>: <code>Io</code>, <code>Protocol</code>, <code>Server { code, message }</code>, <code>UnexpectedResponse</code>.</p>
+<p>Для собственного сервера доступны <code>serve_named_pipe</code>, <code>RequestHandler</code> и <code>ResponseFuture</code>. <code>encode</code>/<code>decode</code> работают только с JSON envelope; length prefix добавляет transport.</p>
+</section>
+<section id="section-12" class="doc-section searchable"><div class="section-kicker">Раздел 12</div><h2>Ошибки</h2>
+<p><code>CoreError</code> и <code>CoreErrorCode</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Ошибка</th><th>Код</th></tr></thead><tbody><tr><td><code>InvalidTransition</code></td><td><code>invalid_state</code></td></tr><tr><td><code>Recognition</code></td><td><code>recognition</code></td></tr><tr><td><code>Command</code></td><td><code>command</code></td></tr><tr><td><code>Busy</code></td><td><code>busy</code></td></tr><tr><td><code>Confirmation</code></td><td><code>confirmation</code></td></tr><tr><td><code>Unavailable</code></td><td><code>unavailable</code></td></tr></tbody></table></div>
+<p>Library API возвращает типизированные ошибки. Daemon преобразует их в <code>IpcErrorCode</code>. <code>anyhow</code> используется только в CLI/daemon process boundary.</p>
+</section>
+<section id="section-13" class="doc-section searchable"><div class="section-kicker">Раздел 13</div><h2>Метрики</h2>
+<p><code>CoreMetrics</code> безопасно клонируется и использует atomics. Producers вызывают методы <code>audio_queued/dequeued/dropped/reconnected</code>, <code>stt_queued/dequeued</code>, <code>recoverable_error</code>, <code>command_completed</code>, <code>observe_kws/stt/handler</code>. <code>snapshot</code> возвращает:</p>
+<ul>
+<li>текущую/максимальную глубину audio и STT очередей;</li>
+<li>dropped audio frames, reconnects, recoverable errors, completed commands;</li>
+<li>last/max latency KWS (µs), STT и handler (ms);</li>
+<li><code>process_working_set_bytes</code>;</li>
+<li>накопленный <code>process_cpu_time_ms</code>.</li>
+</ul>
+<p>Process metrics равны нулю на неподдерживаемой платформе или при ошибке OS API. Счётчики монотонны до перезапуска процесса, кроме текущей глубины очереди.</p>
+</section>
+<section id="section-14" class="doc-section searchable"><div class="section-kicker">Раздел 14</div><h2>Daemon</h2>
+<p><code>assistant-daemon</code>:</p>
+<ul>
+<li>создаёт AppData/config при первом запуске;</li>
+<li>стартует без модели через <code>UnavailableRecognizer</code>;</li>
+<li>владеет аудио worker, runtime task, model lifecycle и IPC;</li>
+<li>перезапускает устройство при disconnect, callback stall или config reload;</li>
+<li>применяет config только из idle/suspended и откатывает runtime при ошибке save;</li>
+<li>активирует установленную модель без перезапуска;</li>
+<li>гарантирует один процесс на pipe;</li>
+<li>завершает workers bounded shutdown.</li>
+</ul>
+<div class="code-block"><div class="code-head"><span>powershell</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-powershell">cargo run -p assistant-daemon
+cargo run -p assistant-daemon -- --config C:\path\assistant.toml --models C:\path\models</code></pre></div>
+</section>
+<section id="section-15" class="doc-section searchable"><div class="section-kicker">Раздел 15</div><h2>CLI</h2>
+<p>Глобальные опции: <code>--config &lt;path&gt;</code>, <code>--models &lt;path&gt;</code>.</p>
+<div class="table-wrap"><table><thead><tr><th>Команда</th><th>Назначение</th></tr></thead><tbody><tr><td><code>devices</code></td><td>список input devices</td></tr><tr><td><code>record --device --seconds --output</code></td><td>запись WAV</td></tr><tr><td><code>validate-config</code></td><td>parse/migrate/structural validate</td></tr><tr><td><code>status</code></td><td><code>GetHealth</code> работающего daemon</td></tr><tr><td><code>soak --seconds</code></td><td>длительная проверка callback/reconnect/queues/process</td></tr><tr><td><code>run-text &lt;text&gt;</code></td><td>matcher → typed handler без микрофона</td></tr><tr><td><code>models install</code></td><td>синхронная установка stock model</td></tr><tr><td><code>models verify [directory]</code></td><td>offline manifest/SHA verify</td></tr><tr><td><code>transcribe &lt;wav&gt; [--model] [--threads]</code></td><td>STT одного WAV</td></tr><tr><td><code>test-wake-word &lt;wav&gt; [--model]</code></td><td>KWS одного WAV</td></tr><tr><td><code>evaluate &lt;wav&gt; [--model]</code></td><td>KWS и transcript вместе</td></tr></tbody></table></div>
+</section>
+<section id="section-16" class="doc-section searchable"><div class="section-kicker">Раздел 16</div><h2>Готовность приложения</h2>
+<p>Перед показом UI:</p>
+<ol>
+<li>подключиться <code>CoreIpcClient</code>;</li>
+<li>проверить <code>HealthSnapshot.core_version</code>, <code>core_api_version</code> и <code>protocol_version</code>;</li>
+<li>показать <code>last_error</code>, если он есть;</li>
+<li>если <code>model_ready = false</code>, предложить <code>InstallModel</code>;</li>
+<li>разрешать voice controls только при <code>audio_ready &amp;&amp; model_ready</code>;</li>
+<li>открыть event subscription;</li>
+<li>после reconnect перечитать health/model/config/metrics;</li>
+<li>подтверждать только token из последнего <code>ConfirmationRequired</code>;</li>
+<li>перед сохранением вызвать <code>ValidateConfig</code>, затем <code>ApplyConfig</code>;</li>
+<li>завершать daemon через <code>Shutdown</code>, если приложение им владеет.</li>
+</ol>
+<p>Для обновления конфигурации UI должен редактировать полный <code>CoreConfig</code>, а не частичный patch. Секреты, аудио и полный transcript по умолчанию не сохраняются.</p>
+</section>
+<section id="section-17" class="doc-section searchable"><div class="section-kicker">Раздел 17</div><h2>Проверки</h2>
+<div class="code-block"><div class="code-head"><span>powershell</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-powershell">cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+$env:RUSTDOCFLAGS = &quot;-D warnings&quot;
+cargo doc --workspace --all-features --no-deps</code></pre></div>
+<p>Полный workspace test запускает процессный E2E: реальный
+<code>assistant-daemon</code> и <code>CoreIpcClient</code> проверяют health,
+suspend/resume и удалённый shutdown через уникальный временный named pipe.
+Windows MSVC target собирается с единым статическим CRT, совпадающим с
+<code>sherpa-onnx</code>, без подавления linker diagnostics.</p>
+<p><code>assistant-core</code> включает <code>#![warn(missing_docs)]</code>: любой новый публичный элемент обязан иметь Rustdoc. Реальный WAV regression test использует внешний фиксированный файл и описан в README, потому что WAV не хранится в Git.</p>
+</section>
+  </div></main>
+</div>
+<a class="backtop" id="backtop" href="#main" aria-label="Наверх">↑</a>
+<script>
+const search=document.getElementById('search'),sections=[...document.querySelectorAll('.searchable')],empty=document.getElementById('empty');
+function filter(){const q=search.value.trim().toLocaleLowerCase('ru');let visible=0;sections.forEach(s=>{const show=!q||s.textContent.toLocaleLowerCase('ru').includes(q);s.classList.toggle('hidden',!show);if(show)visible++});empty.style.display=visible?'none':'block'}
+search.addEventListener('input',filter);document.addEventListener('keydown',e=>{if(e.key==='/'&&!/input|textarea/i.test(document.activeElement.tagName)){e.preventDefault();search.focus()}if(e.key==='Escape'&&document.activeElement===search){search.value='';filter();search.blur()}});
+async function copyText(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return}const area=document.createElement('textarea');area.value=text;area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();document.execCommand('copy');area.remove()}
+document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',async()=>{const text=b.closest('.code-block').querySelector('code').textContent;await copyText(text);b.textContent='Скопировано';setTimeout(()=>b.textContent='Копировать',1300)}));
+const nav=[...document.querySelectorAll('[data-nav]')],observer=new IntersectionObserver(entries=>{entries.filter(e=>e.isIntersecting).forEach(e=>nav.forEach(a=>a.classList.toggle('active',a.dataset.nav===e.target.id)))},{rootMargin:'-15% 0px -75%'});document.querySelectorAll('.doc-section').forEach(s=>observer.observe(s));
+const progress=document.getElementById('progress'),backtop=document.getElementById('backtop');addEventListener('scroll',()=>{const max=document.documentElement.scrollHeight-innerHeight;progress.style.width=(max?scrollY/max*100:0)+'%';backtop.classList.toggle('visible',scrollY>700)},{passive:true});
+</script>
+</body></html>

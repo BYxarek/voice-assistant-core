@@ -1,0 +1,51 @@
+schema_version = 2
+
+[audio]
+device_id = "default"
+target_sample_rate = 16000
+channels = 1
+frame_ms = 20
+pre_roll_ms = 900
+queue_capacity_frames = 250
+vad_threshold = 0.015
+command_min_ms = 300
+command_max_ms = 10000
+trailing_silence_ms = 700
+reconnect_delay_ms = 1000
+stall_timeout_ms = 3000
+
+[matching]
+normalize_yo = true
+
+[wake_word]
+keyword = "ассистент"
+score = 1.5
+threshold = 0.35
+cooldown_ms = 1200
+
+[inference]
+threads = 4
+queue_capacity = 2
+timeout_ms = 30000
+
+[policy]
+# Set to false to execute every command, including high-risk commands,
+# without confirmation.
+confirmations_enabled = true
+confirmation_timeout_ms = 15000
+
+[ipc]
+pipe_name = "voice-assistant-core"
+io_timeout_ms = 30000
+
+[[commands]]
+id = "open_notepad"
+enabled = true
+phrases = ["открой блокнот", "запусти блокнот"]
+handler = "launch_app"
+risk = "low"
+requires_confirmation = false
+timeout_ms = 10000
+
+[commands.parameters]
+executable = "notepad.exe"

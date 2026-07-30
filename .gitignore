@@ -1,0 +1,6 @@
+/target/
+/models/
+/logs/
+*.wav
+assistant.toml
+

@@ -1,0 +1,10 @@
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.html text eol=lf
+*.wav binary
+*.onnx binary
+*.model binary
+

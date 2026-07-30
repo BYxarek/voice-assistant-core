@@ -17,7 +17,7 @@ repository = "https://github.com/BYxarek/voice-assistant-core"
 anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
-cpal = "0.15"
+cpal = "0.18"
 hound = "3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

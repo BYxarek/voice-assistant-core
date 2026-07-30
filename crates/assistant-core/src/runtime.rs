@@ -26,6 +26,8 @@ struct PendingCommand {
     confirmation_id: Option<String>,
 }
 
+const MAX_SUBMITTED_TEXT_BYTES: usize = 4_096;
+
 /// Stateful command pipeline shared by the daemon and diagnostic CLI.
 pub struct Runtime {
     state: AssistantState,
@@ -184,6 +186,27 @@ impl Runtime {
         self.transition(AssistantState::CapturingCommand)
     }
 
+    /// Starts capture requested by a trusted application without a wake word.
+    pub fn start_manual_capture(&mut self) -> Result<(), CoreError> {
+        self.transition(AssistantState::CapturingCommand)
+    }
+
+    /// Returns an empty or too-short manual capture to idle listening.
+    pub fn cancel_capture(&mut self) -> Result<(), CoreError> {
+        self.transition(AssistantState::IdleListening)
+    }
+
+    /// Matches application-supplied text through the normal command policy.
+    pub async fn process_text(&mut self, text: String) -> Result<(), CoreError> {
+        if text.trim().is_empty() || text.len() > MAX_SUBMITTED_TEXT_BYTES {
+            return Err(CoreError::Command(format!(
+                "submitted text must contain 1..={MAX_SUBMITTED_TEXT_BYTES} UTF-8 bytes"
+            )));
+        }
+        self.transition(AssistantState::MatchingCommand)?;
+        self.match_text(text, false).await
+    }
+
     /// Transcribes audio after an already published capture phase.
     pub async fn process_captured_audio(
         &mut self,
@@ -206,14 +229,17 @@ impl Runtime {
             confidence: transcript.confidence,
         });
         self.transition(AssistantState::MatchingCommand)?;
+        self.match_text(transcript.text, true).await
+    }
 
-        let Some(command) = self
-            .registry
-            .find_after_wake_word(&transcript.text, &self.wake_word)
-        else {
-            let _ = self.events.send(AssistantEvent::CommandNotMatched {
-                text: transcript.text,
-            });
+    async fn match_text(&mut self, text: String, allow_wake_word: bool) -> Result<(), CoreError> {
+        let command = if allow_wake_word {
+            self.registry.find_after_wake_word(&text, &self.wake_word)
+        } else {
+            self.registry.find(&text)
+        };
+        let Some(command) = command else {
+            let _ = self.events.send(AssistantEvent::CommandNotMatched { text });
             self.enter_cooldown()?;
             return Ok(());
         };
@@ -573,6 +599,44 @@ mod tests {
         assert_eq!(runtime.state(), AssistantState::Cooldown);
         runtime.complete_cooldown().unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn submitted_text_uses_matching_and_command_policy_without_stt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new(
+            Arc::new(FailingRecognizer),
+            CommandRegistry::new(vec![command(RiskLevel::Low)], true),
+            Arc::new(CountingExecutor(Arc::clone(&calls))),
+            "ассистент".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        runtime.process_text("открой блокнот".into()).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.state(), AssistantState::Cooldown);
+    }
+
+    #[test]
+    fn manual_capture_can_return_to_idle_without_transcription() {
+        let mut runtime = Runtime::new(
+            Arc::new(FailingRecognizer),
+            CommandRegistry::new(Vec::new(), true),
+            Arc::new(CountingExecutor(Arc::new(AtomicUsize::new(0)))),
+            "ассистент".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        runtime.start_manual_capture().unwrap();
+        assert_eq!(runtime.state(), AssistantState::CapturingCommand);
+        runtime.cancel_capture().unwrap();
+        assert_eq!(runtime.state(), AssistantState::IdleListening);
     }
 
     #[tokio::test]

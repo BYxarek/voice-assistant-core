@@ -127,6 +127,20 @@ impl<V: VoiceActivityDetector> CommandAudioPipeline<V> {
         self.collector.is_some()
     }
 
+    /// Starts application-requested capture without wake-word pre-roll.
+    pub fn start_manual(&mut self) {
+        if self.collector.is_none() {
+            self.ring = AudioRingBuffer::new(self.pre_roll_samples);
+            self.vad.reset();
+            self.collector = Some(CommandCollector::start(
+                Vec::new(),
+                self.min_samples,
+                self.max_samples,
+                self.trailing_silence_samples,
+            ));
+        }
+    }
+
     /// Processes one frame and returns a completed command when policy stops capture.
     pub fn push(&mut self, frame: &[f32], wake_word_detected: bool) -> Option<Vec<f32>> {
         if let Some(collector) = self.collector.as_mut() {
@@ -146,6 +160,13 @@ impl<V: VoiceActivityDetector> CommandAudioPipeline<V> {
             ));
         }
         None
+    }
+
+    /// Finishes an active manual capture, discarding audio shorter than the minimum.
+    pub fn finish(&mut self) -> Option<Vec<f32>> {
+        let result = self.collector.take().and_then(CommandCollector::finish);
+        self.reset();
+        result
     }
 
     /// Clears pre-roll, active capture and detector state.
@@ -192,6 +213,10 @@ impl CommandCollector {
                 && self.silence_samples >= self.trailing_silence_samples);
         complete.then(|| std::mem::take(&mut self.samples))
     }
+
+    fn finish(mut self) -> Option<Vec<f32>> {
+        (self.samples.len() >= self.min_samples).then(|| std::mem::take(&mut self.samples))
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +257,18 @@ mod tests {
             pipeline.push(&[0.0, 0.0], false),
             Some(vec![1.0, 1.0, 1.0, 0.0, 0.0])
         );
+    }
+
+    #[test]
+    fn manual_finish_keeps_only_a_long_enough_capture() {
+        let mut pipeline = CommandAudioPipeline::new(EnergyVad::new(0.5), 0, 3, 10, 2);
+        pipeline.start_manual();
+        pipeline.push(&[1.0], false);
+        assert!(pipeline.finish().is_none());
+
+        pipeline.start_manual();
+        pipeline.push(&[1.0, 1.0, 1.0], false);
+        assert_eq!(pipeline.finish(), Some(vec![1.0, 1.0, 1.0]));
+        assert!(!pipeline.is_collecting());
     }
 }

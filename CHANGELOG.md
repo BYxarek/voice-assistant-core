@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0] — 2026-07-30
+
+### Добавлено
+
+- IPC-запросы `begin_capture`, `end_capture` и `submit_text` для push-to-talk
+  и текстового ввода через существующую command policy;
+- `HealthSnapshot.active_audio_device` и событие `audio_device_changed`;
+- автоматическое переоткрытие потока при смене default input device Windows.
+
+### Изменено
+
+- Windows x64 release ZIP включает runtime-DLL и проверяется запуском daemon/CLI
+  из распакованного архива.
+
 ## [1.0.1] — 2026-07-30
 
 ### Изменено
@@ -29,3 +43,4 @@
 
 [1.0.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.0
 [1.0.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.1
+[1.1.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.0

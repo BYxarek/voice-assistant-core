@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::audio::AudioDeviceInfo;
+
 /// Current incompatible-version boundary for serialized IPC envelopes.
 pub const PROTOCOL_VERSION: u16 = 2;
 
@@ -16,6 +18,9 @@ pub struct HealthSnapshot {
     pub core_version: String,
     /// Whether an input stream is currently producing frames.
     pub audio_ready: bool,
+    /// Currently opened input endpoint, when available.
+    #[serde(default)]
+    pub active_audio_device: Option<AudioDeviceInfo>,
     /// Whether a verified recognizer model is active.
     pub model_ready: bool,
     /// Loaded configuration schema.
@@ -125,7 +130,12 @@ impl AssistantState {
             (Starting, IdleListening)
                 | (
                     IdleListening,
-                    SpeechDetected | Suspended | Recovering | ShuttingDown
+                    SpeechDetected
+                        | CapturingCommand
+                        | MatchingCommand
+                        | Suspended
+                        | Recovering
+                        | ShuttingDown
                 )
                 | (
                     SpeechDetected,
@@ -213,6 +223,11 @@ pub enum AssistantEvent {
         component: String,
         /// Diagnostic failure description.
         message: String,
+    },
+    /// The active input endpoint changed or became unavailable.
+    AudioDeviceChanged {
+        /// Newly opened input endpoint, or `None` while no endpoint is available.
+        device: Option<AudioDeviceInfo>,
     },
     /// Model installation advanced between allowlisted files.
     ModelInstallProgress {

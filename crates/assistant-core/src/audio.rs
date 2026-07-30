@@ -14,10 +14,10 @@ use thiserror::Error;
 
 use crate::metrics::CoreMetrics;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// User-visible input-device descriptor.
 pub struct AudioDeviceInfo {
-    /// Stable backend identifier accepted by [`AudioInput::open`].
+    /// Backend identifier accepted by [`AudioInput::open`].
     pub id: String,
     /// Display name reported by the operating system.
     pub name: String,
@@ -49,6 +49,7 @@ pub struct AudioInput {
     source_rate: u32,
     failed: Arc<AtomicBool>,
     metrics: CoreMetrics,
+    device: AudioDeviceInfo,
 }
 
 impl AudioInput {
@@ -58,7 +59,7 @@ impl AudioInput {
         queue_capacity: usize,
         metrics: CoreMetrics,
     ) -> Result<Self, AudioError> {
-        let device = select_input_device(device_id)?;
+        let (device, info) = select_input_device(device_id)?;
         let config = device
             .default_input_config()
             .map_err(|error| AudioError::Device(error.to_string()))?;
@@ -139,12 +140,18 @@ impl AudioInput {
             source_rate,
             failed,
             metrics,
+            device: info,
         })
     }
 
     /// Native device sample rate before worker-side resampling.
     pub fn source_rate(&self) -> u32 {
         self.source_rate
+    }
+
+    /// Selected backend device and whether it was the default when opened.
+    pub fn device(&self) -> &AudioDeviceInfo {
+        &self.device
     }
 
     /// Waits for one downmixed block without running work in the callback.
@@ -189,6 +196,21 @@ pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, AudioError> {
         .collect()
 }
 
+/// Returns the current default input-device descriptor.
+pub fn default_input_device() -> Result<AudioDeviceInfo, AudioError> {
+    let device = cpal::default_host()
+        .default_input_device()
+        .ok_or_else(|| AudioError::Device("no default input device".into()))?;
+    let name = device
+        .name()
+        .map_err(|error| AudioError::Device(error.to_string()))?;
+    Ok(AudioDeviceInfo {
+        id: name.clone(),
+        name,
+        is_default: true,
+    })
+}
+
 /// Records one input device to a mono floating-point WAV at the target rate.
 pub fn record_wav(
     device_id: &str,
@@ -222,17 +244,43 @@ pub fn record_wav(
     Ok(())
 }
 
-fn select_input_device(device_id: &str) -> Result<cpal::Device, AudioError> {
+fn select_input_device(device_id: &str) -> Result<(cpal::Device, AudioDeviceInfo), AudioError> {
     let host = cpal::default_host();
     if device_id == "default" {
-        return host
+        let device = host
             .default_input_device()
-            .ok_or_else(|| AudioError::Device("no default input device".into()));
+            .ok_or_else(|| AudioError::Device("no default input device".into()))?;
+        let name = device
+            .name()
+            .map_err(|error| AudioError::Device(error.to_string()))?;
+        return Ok((
+            device,
+            AudioDeviceInfo {
+                id: name.clone(),
+                name,
+                is_default: true,
+            },
+        ));
     }
-    host.input_devices()
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let device = host
+        .input_devices()
         .map_err(|error| AudioError::Device(error.to_string()))?
         .find(|device| device.name().is_ok_and(|name| name == device_id))
-        .ok_or_else(|| AudioError::Device(format!("input device not found: {device_id}")))
+        .ok_or_else(|| AudioError::Device(format!("input device not found: {device_id}")))?;
+    let name = device
+        .name()
+        .map_err(|error| AudioError::Device(error.to_string()))?;
+    Ok((
+        device,
+        AudioDeviceInfo {
+            id: name.clone(),
+            is_default: default_name.as_deref() == Some(&name),
+            name,
+        },
+    ))
 }
 
 fn enqueue(sender: &mpsc::SyncSender<Vec<f32>>, metrics: &CoreMetrics, block: Vec<f32>) {

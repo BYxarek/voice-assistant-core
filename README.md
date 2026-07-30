@@ -9,7 +9,7 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.0.1**. Публичный Rust extension API v1 и IPC
+Текущий стабильный релиз — **1.1.0**. Публичный Rust extension API v1 и IPC
 protocol v2 готовы для разработки приложений. Форматы аудио, очереди и
 inference изолированы от GUI.
 
@@ -23,14 +23,17 @@ inference изолированы от GUI.
 - `CURRENT_CONFIG_VERSION` независимо версионирует конфигурацию.
 
 История релизов находится в [CHANGELOG.md](CHANGELOG.md). Каждый тег `v*`
-автоматически собирает Windows x64 архив с daemon, CLI и примером конфигурации.
+автоматически собирает и проверяет Windows x64 архив с daemon, CLI, примером
+конфигурации и необходимыми runtime-DLL.
 
 ## Возможности
 
 - bounded audio pipeline: CPAL → mono → 16 кГц → KWS → VAD → STT;
 - отдельная задача runtime и отдельный persistent STT worker;
 - IPC доступен в состоянии `Starting`, пока cancellable blocking worker загружает STT и публикует прогресс;
-- восстановление микрофона после ошибки или зависания callback;
+- восстановление микрофона после ошибки или зависания callback и автоматическое
+  переключение при смене default input;
+- ручной push-to-talk и безопасная отправка текста через IPC без обхода command policy;
 - типизированные обработчики команд без передачи текста в shell;
 - одноразовый `confirmation_id`, timeout и полное отключение подтверждений;
 - запуск без модели, установка/отмена/проверка модели во время работы;
@@ -43,11 +46,22 @@ inference изолированы от GUI.
 ## Требования
 
 - Windows 10/11 x64;
-- Rust 1.97 или новее;
+- Rust 1.97 или новее — только для сборки из исходников;
 - микрофон для голосового режима;
 - сеть только для первой установки модели.
 
 ## Быстрый старт
+
+Для обычного использования скачайте Windows x64 ZIP со страницы
+[Releases](https://github.com/BYxarek/voice-assistant-core/releases), распакуйте
+его и запустите готовые программы:
+
+```powershell
+.\assistant-daemon.exe
+.\assistant-cli.exe status
+```
+
+Rust и Cargo для готового релиза не требуются. Для разработки самого ядра:
 
 ```powershell
 cargo run -p assistant-cli -- validate-config
@@ -150,12 +164,23 @@ envelope имеет `protocol_version`, `request_id`, `payload` и little-endian
 - `get_status`, `get_health`, `get_config`, `get_metrics`;
 - `validate_config`, `apply_config`, `list_audio_devices`;
 - `get_model_status`, `install_model`, `cancel_model_install`, `verify_model`;
-- `suspend`, `resume`, `confirm`, `cancel`;
+- `suspend`, `resume`, `begin_capture`, `end_capture`, `submit_text`;
+- `confirm`, `cancel`;
 - `subscribe_events`, `shutdown`.
+
+`begin_capture` запускает запись без wake word, а `end_capture` передаёт в STT
+только аудио не короче `audio.command_min_ms`. `submit_text` принимает непустую
+UTF-8 строку до 4096 байт, сопоставляет её с командой без обязательного wake-word
+prefix и применяет те же risk, confirmation и timeout rules.
 
 `CoreIpcClient` проверяет версию, ограничивает размер сообщения и повторяет
 кратковременное подключение. `subscribe_events` создаёт отдельный
 `EventSubscription`. Ошибки имеют стабильный `IpcErrorCode`.
+
+При `audio.device_id = "default"` worker проверяет текущий Windows input endpoint
+и автоматически переоткрывает поток после его смены. `HealthSnapshot` содержит
+`active_audio_device`, а подписчики получают `audio_device_changed`; значение
+`None` означает, что рабочий input endpoint временно недоступен.
 
 Применение конфигурации выполняется только из `Idle`/`Suspended`. После миграции
 и проверки runtime меняет только затронутые компоненты: команды, подтверждения

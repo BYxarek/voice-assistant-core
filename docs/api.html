@@ -22,7 +22,7 @@
 <a class="skip" href="#main">К содержанию</a><div class="progress" id="progress"></div>
 <div class="layout">
   <aside class="sidebar">
-    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.0.1 · Public API v1</span></span></a>
+    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.1.0 · Public API v1</span></span></a>
     <div class="search-wrap"><label class="sr-only" for="search">Поиск</label><input id="search" class="search" type="search" placeholder="Поиск по API…" autocomplete="off"><span class="search-key">/</span></div>
     <div class="nav-title">Содержание</div><nav class="nav" aria-label="Разделы API"><a href="#section-1" data-nav="section-1"><span>01</span>Версии, Cargo features и платформы</a>
 <a href="#section-2" data-nav="section-2"><span>02</span>Публичные модули</a>
@@ -44,13 +44,13 @@
     <div class="side-links"><a href="index.html">Обзор</a><a href="../target/doc/assistant_core/index.html">Rustdoc</a></div>
   </aside>
   <main id="main"><div class="content">
-    <header class="hero searchable"><div class="eyebrow">Developer reference · 17 разделов</div><h1>Полный справочник API</h1><p>Rust embedding, расширения команд, runtime, IPC, конфигурация, модели, аудио и всё необходимое для создания приложения поверх ядра.</p><div class="badges"><span class="badge"><strong>Core API</strong> v1</span><span class="badge"><strong>IPC</strong> v1</span><span class="badge"><strong>Config</strong> schema 2</span></div></header>
+    <header class="hero searchable"><div class="eyebrow">Developer reference · 17 разделов</div><h1>Полный справочник API</h1><p>Rust embedding, расширения команд, runtime, IPC, конфигурация, модели, аудио и всё необходимое для создания приложения поверх ядра.</p><div class="badges"><span class="badge"><strong>Core API</strong> v1</span><span class="badge"><strong>IPC</strong> v2</span><span class="badge"><strong>Config</strong> schema 2</span></div></header>
     <div id="empty" class="empty">Ничего не найдено. Попробуйте имя типа, метода или IPC-запроса.</div>
-    <p>Этот документ описывает весь публичный контракт <code>assistant-core</code> v0.1: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
+    <p>Этот документ описывает публичный контракт <code>assistant-core</code> 1.1.0: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
 <section id="section-1" class="doc-section searchable"><div class="section-kicker">Раздел 1</div><h2>Версии, Cargo features и платформы</h2>
 <ul>
 <li><code>CORE_API_VERSION = 1</code> — версия публичного Rust extension/embedding API.</li>
-<li><code>PROTOCOL_VERSION = 1</code> — несовместимая граница wire-протокола IPC.</li>
+<li><code>PROTOCOL_VERSION = 2</code> — несовместимая граница wire-протокола IPC.</li>
 <li><code>CURRENT_CONFIG_VERSION = 2</code> — схема TOML и <code>CoreConfig</code>.</li>
 <li>Основная платформа — Windows 10/11 x64, MSRV — Rust 1.97.</li>
 <li>default feature <code>model-source-huggingface</code> включает установку модели.</li>
@@ -120,6 +120,7 @@ task.join().await?;
 <li><code>command_finished { command_id, result }</code>;</li>
 <li><code>command_not_matched { text }</code>;</li>
 <li><code>recoverable_error { component, message }</code>;</li>
+<li><code>audio_device_changed { device }</code>;</li>
 <li><code>model_install_progress { completed_files, total_files, file }</code>;</li>
 <li><code>model_ready { revision }</code>.</li>
 </ul>
@@ -189,7 +190,7 @@ handlers.register(Arc::new(SetVolume))?;
 <p><code>SherpaWakeWordDetector::new</code> загружает модель и кодирует keyword. <code>process</code> принимает streaming mono frame и возвращает <code>WakeWordDetection { keyword, start_time }</code>; <code>reset</code> очищает decoder state.</p>
 </section>
 <section id="section-8" class="doc-section searchable"><div class="section-kicker">Раздел 8</div><h2>Audio API</h2>
-<p><code>list_input_devices</code> возвращает <code>AudioDeviceInfo { id, name, is_default }</code>. <code>AudioInput::open(device_id, queue_capacity_frames, metrics)</code> открывает default/выбранный input и создаёт bounded callback queue.</p>
+<p><code>list_input_devices</code> возвращает <code>AudioDeviceInfo { id, name, is_default }</code>. <code>default_input_device</code> сообщает текущий Windows default endpoint. <code>AudioInput::open(device_id, queue_capacity_frames, metrics)</code> открывает default/выбранный input и создаёт bounded callback queue; <code>device</code> возвращает реально открытый endpoint.</p>
 <ul>
 <li><code>source_rate</code> — нативная частота устройства;</li>
 <li><code>recv_timeout</code> — <code>Ok(Some(block))</code>, <code>Ok(None)</code> по timeout либо typed error;</li>
@@ -247,7 +248,8 @@ UTF-8 JSON Envelope</code></pre></div>
   &quot;request_id&quot;: &quot;ui-42&quot;,
   &quot;payload&quot;: { &quot;type&quot;: &quot;get_health&quot; }
 }</code></pre></div>
-<div class="table-wrap"><table><thead><tr><th>Request</th><th>Успешный response</th></tr></thead><tbody><tr><td><code>get_status</code></td><td><code>status { state }</code></td></tr><tr><td><code>get_health</code></td><td><code>health { health }</code></td></tr><tr><td><code>get_config</code></td><td><code>config { config }</code></td></tr><tr><td><code>validate_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>apply_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>list_audio_devices</code></td><td><code>audio_devices { devices }</code></td></tr><tr><td><code>get_metrics</code></td><td><code>metrics { metrics }</code></td></tr><tr><td><code>get_model_status</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>install_model</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_model_install</code></td><td><code>accepted</code></td></tr><tr><td><code>verify_model</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>suspend_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>resume_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>confirm_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>subscribe_events</code></td><td><code>accepted</code>, затем только <code>event { event }</code></td></tr><tr><td><code>shutdown</code></td><td><code>accepted</code></td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Request</th><th>Успешный response</th></tr></thead><tbody><tr><td><code>get_status</code></td><td><code>status { state }</code></td></tr><tr><td><code>get_health</code></td><td><code>health { health }</code></td></tr><tr><td><code>get_config</code></td><td><code>config { config }</code></td></tr><tr><td><code>validate_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>apply_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>list_audio_devices</code></td><td><code>audio_devices { devices }</code></td></tr><tr><td><code>get_metrics</code></td><td><code>metrics { metrics }</code></td></tr><tr><td><code>get_model_status</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>install_model</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_model_install</code></td><td><code>accepted</code></td></tr><tr><td><code>verify_model</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>suspend_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>resume_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>begin_capture</code></td><td><code>accepted</code></td></tr><tr><td><code>end_capture</code></td><td><code>accepted</code></td></tr><tr><td><code>submit_text { text }</code></td><td><code>accepted</code></td></tr><tr><td><code>confirm_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>subscribe_events</code></td><td><code>accepted</code>, затем только <code>event { event }</code></td></tr><tr><td><code>shutdown</code></td><td><code>accepted</code></td></tr></tbody></table></div>
+<p><code>HealthSnapshot.active_audio_device</code> содержит реально открытый input endpoint. При <code>audio.device_id = "default"</code> daemon автоматически переоткрывает поток после смены Windows default input.</p>
 <p>Ошибка: <code>error { code, message }</code>. Коды: <code>invalid_request</code>, <code>protocol_version</code>, <code>configuration</code>, <code>audio</code>, <code>model</code>, <code>runtime_busy</code>, <code>confirmation</code>, <code>internal</code>.</p>
 <div class="code-block"><div class="code-head"><span>rust</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-rust">use std::time::Duration;
 use assistant_core::{CoreIpcClient, CoreRequest, CoreResponse};

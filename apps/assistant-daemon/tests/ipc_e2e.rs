@@ -8,9 +8,9 @@ use std::{
 };
 
 use assistant_core::{
-    AssistantState, CORE_API_VERSION, CORE_VERSION, CoreConfig, PROTOCOL_VERSION,
+    AssistantState, CORE_API_VERSION, CORE_VERSION, CoreConfig, IpcClientError, PROTOCOL_VERSION,
     config::CURRENT_CONFIG_VERSION,
-    ipc::{CoreRequest, CoreResponse, windows::CoreIpcClient},
+    ipc::{CoreRequest, CoreResponse, IpcErrorCode, windows::CoreIpcClient},
 };
 
 struct DaemonProcess {
@@ -90,6 +90,26 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
             response => panic!("unexpected startup response: {response:?}"),
         }
     }
+
+    assert!(matches!(
+        client
+            .request(CoreRequest::SubmitText {
+                text: String::new()
+            })
+            .await
+            .unwrap_err(),
+        IpcClientError::Server {
+            code: IpcErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    assert!(matches!(
+        client.request(CoreRequest::BeginCapture).await.unwrap_err(),
+        IpcClientError::Server {
+            code: IpcErrorCode::Audio,
+            ..
+        }
+    ));
 
     assert!(matches!(
         client.request(CoreRequest::SuspendListening).await.unwrap(),

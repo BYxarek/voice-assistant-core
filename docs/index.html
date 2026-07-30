@@ -33,7 +33,7 @@
   </nav>
   <main>
     <h1>Voice Assistant Core</h1>
-    <p>Voice Assistant Core <strong>1.0.1</strong> — локальное Windows-ядро с
+    <p>Voice Assistant Core <strong>1.1.0</strong> — локальное Windows-ядро с
       versioned IPC и стабильным Rust extension API v1.
       GUI, аудио, inference и типизированные команды разделены явными границами.</p>
     <p><a href="rustdoc/assistant_core/index.html">Открыть опубликованный Rustdoc</a>.
@@ -44,6 +44,13 @@
       конфигурации, adapters, модели, метрики и CLI.</p>
 
     <h2 id="start">Быстрый старт</h2>
+    <p>Для обычного использования скачайте Windows x64 ZIP из
+      <a href="https://github.com/BYxarek/voice-assistant-core/releases">GitHub Releases</a>
+      и распакуйте его. Архив содержит готовые daemon, CLI, пример конфигурации
+      и необходимые runtime-DLL; Rust и Cargo не требуются.</p>
+    <pre><code>.\assistant-daemon.exe
+.\assistant-cli.exe status</code></pre>
+    <p>Для разработки самого ядра используйте сборку из исходников:</p>
     <pre><code>cargo run -p assistant-cli -- models install
 cargo run -p assistant-daemon
 cargo run -p assistant-cli -- status</code></pre>
@@ -100,12 +107,21 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       JSON envelope с <code>protocol_version</code> и лимитом 1 МиБ.</p>
     <p>API включает health/status/config/metrics/audio devices, validate/apply
       config, status/install/cancel/verify model, suspend/resume,
-      confirm/cancel, events и shutdown. Подтверждение адресуется одноразовым
+      begin/end capture, submit text, confirm/cancel, events и shutdown.
+      <code>begin_capture</code> включает push-to-talk без wake word;
+      <code>end_capture</code> отправляет достаточно длинную запись в STT.
+      <code>submit_text</code> принимает до 4096 байт и использует тот же
+      command matching, risk policy и confirmation flow. Подтверждение адресуется одноразовым
       <code>confirmation_id</code>. Ошибки имеют типизированный
       <code>IpcErrorCode</code>.</p>
     <p>IPC начинает обслуживать GUI до загрузки STT: состояние остаётся
       <code>Starting</code>, а <code>ModelStatus::Loading</code> и
       <code>ModelLoadProgress</code> сообщают этап и процент загрузки.</p>
+    <p>Для <code>audio.device_id = "default"</code> daemon автоматически
+      переоткрывает поток при смене Windows input endpoint.
+      <code>HealthSnapshot.active_audio_device</code> показывает активный
+      endpoint, а событие <code>AudioDeviceChanged</code> сообщает его смену
+      или временную недоступность.</p>
 
     <h2 id="config">Конфигурация</h2>
     <p>Текущая schema — 2; schema 1 мигрируется автоматически. Изменение
@@ -137,6 +153,11 @@ cargo doc --workspace --all-features --no-deps</code></pre>
     <p>Метрики содержат переполнение и глубину очередей, reconnect, задержки
       KWS/STT/handler, CPU time и working set. Реальный WAV не хранится в Git;
       повторяемый ignored-тест описан в README.</p>
+    <p>Ручная проверка device switching: запустите daemon с
+      <code>audio.device_id = "default"</code>, подпишитесь на events, смените
+      default-микрофон в Windows и убедитесь, что приходит
+      <code>audio_device_changed</code>, а <code>get_health</code> показывает
+      новый endpoint.</p>
   </main>
 </div>
 </body>

@@ -53,7 +53,10 @@ pub struct RuntimeUpdate {
 enum Control {
     Start(oneshot::Sender<Result<(), CoreError>>),
     BeginCapture(oneshot::Sender<Result<(), CoreError>>),
+    BeginManualCapture(oneshot::Sender<Result<(), CoreError>>),
+    CancelCapture(oneshot::Sender<Result<(), CoreError>>),
     Captured(TranscriptionRequest, oneshot::Sender<Result<(), CoreError>>),
+    SubmitText(String, oneshot::Sender<Result<(), CoreError>>),
     Suspend(oneshot::Sender<Result<(), CoreError>>),
     Resume(oneshot::Sender<Result<(), CoreError>>),
     Confirm(String, oneshot::Sender<Result<(), CoreError>>),
@@ -109,11 +112,31 @@ impl RuntimeHandle {
         self.call(Control::BeginCapture).await
     }
 
+    /// Publishes capture state for an application-requested recording.
+    pub async fn begin_manual_capture(&self) -> Result<(), CoreError> {
+        self.call(Control::BeginManualCapture).await
+    }
+
+    /// Cancels a manual recording that did not produce enough audio.
+    pub async fn cancel_capture(&self) -> Result<(), CoreError> {
+        self.call(Control::CancelCapture).await
+    }
+
     /// Queues completed command audio for STT and matching.
     pub async fn captured_audio(&self, request: TranscriptionRequest) -> Result<(), CoreError> {
         let (response, receiver) = oneshot::channel();
         self.controls
             .send(Control::Captured(request, response))
+            .await
+            .map_err(|_| stopped())?;
+        receiver.await.map_err(|_| stopped())?
+    }
+
+    /// Matches validated application text through command policy without STT.
+    pub async fn submit_text(&self, text: impl Into<String>) -> Result<(), CoreError> {
+        let (response, receiver) = oneshot::channel();
+        self.controls
+            .send(Control::SubmitText(text.into(), response))
             .await
             .map_err(|_| stopped())?;
         receiver.await.map_err(|_| stopped())?
@@ -284,8 +307,17 @@ pub fn spawn_runtime_service(
                         Control::BeginCapture(response) => {
                             let _ = response.send(runtime.start_command_capture());
                         }
+                        Control::BeginManualCapture(response) => {
+                            let _ = response.send(runtime.start_manual_capture());
+                        }
+                        Control::CancelCapture(response) => {
+                            let _ = response.send(runtime.cancel_capture());
+                        }
                         Control::Captured(request, response) => {
                             let _ = response.send(runtime.process_captured_audio(request).await);
+                        }
+                        Control::SubmitText(text, response) => {
+                            let _ = response.send(runtime.process_text(text).await);
                         }
                         Control::Suspend(response) => {
                             let _ = response.send(runtime.suspend());

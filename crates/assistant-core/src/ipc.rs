@@ -69,6 +69,15 @@ pub enum CoreRequest {
     SuspendListening,
     /// Resumes listening.
     ResumeListening,
+    /// Starts microphone capture without requiring the wake word.
+    BeginCapture,
+    /// Stops manual capture and submits audio that meets the configured minimum duration.
+    EndCapture,
+    /// Matches validated application text through the same command policy as recognized speech.
+    SubmitText {
+        /// Command phrase without a required wake-word prefix.
+        text: String,
+    },
     /// Executes the invocation addressed by a one-time token.
     ConfirmCommand {
         /// Token from `confirmation_required`.
@@ -193,6 +202,25 @@ mod tests {
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
             r#"{"protocol_version":2,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+        );
+    }
+
+    #[test]
+    fn manual_input_wire_formats_are_stable() {
+        let begin = Envelope::new("manual-1", CoreRequest::BeginCapture);
+        assert_eq!(
+            String::from_utf8(encode(&begin).unwrap()).unwrap(),
+            r#"{"protocol_version":2,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
+        );
+        let text = Envelope::new(
+            "manual-2",
+            CoreRequest::SubmitText {
+                text: "open notepad".into(),
+            },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&text).unwrap()).unwrap(),
+            r#"{"protocol_version":2,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
         );
     }
 }

@@ -20,9 +20,20 @@ jobs:
           New-Item -ItemType Directory package | Out-Null
           Copy-Item target\release\assistant-cli.exe package\
           Copy-Item target\release\assistant-daemon.exe package\
+          Get-ChildItem target\release -Filter *.dll -File |
+            Copy-Item -Destination package\
           Copy-Item config\assistant.example.toml package\
           Copy-Item README.md,LICENSE,CHANGELOG.md package\
-          Compress-Archive package\* "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"
+          $archive = "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"
+          Compress-Archive package\* $archive
+
+          $smoke = Join-Path $env:RUNNER_TEMP release-smoke
+          Expand-Archive $archive $smoke
+          $env:PATH = "$smoke;$env:SystemRoot\System32;$env:SystemRoot"
+          & "$smoke\assistant-cli.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged assistant-cli failed to start" }
+          & "$smoke\assistant-daemon.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged assistant-daemon failed to start" }
       - name: Publish GitHub release
         shell: pwsh
         run: gh release create $env:GITHUB_REF_NAME --verify-tag --generate-notes "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"

@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -13,7 +13,7 @@ use assistant_core::{
     CommandRegistry, CoreConfig, CoreError, CoreMetrics, HealthSnapshot, ModelStatus,
     PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle, RuntimeUpdate, SpeechRecognizer,
     TranscriptionRequest, UnavailableRecognizer,
-    audio::{AudioInput, resample_linear},
+    audio::{AudioDeviceInfo, AudioInput, default_input_device, resample_linear},
     builtin_handlers,
     config::CURRENT_CONFIG_VERSION,
     ipc::{
@@ -47,6 +47,12 @@ struct AudioSettings {
     model: Option<PathBuf>,
 }
 
+#[derive(Default)]
+struct ActiveAudioDevice {
+    observed: bool,
+    device: Option<AudioDeviceInfo>,
+}
+
 #[derive(Clone)]
 struct DaemonContext {
     runtime: RuntimeHandle,
@@ -62,6 +68,8 @@ struct DaemonContext {
     audio_settings: Arc<RwLock<AudioSettings>>,
     audio_generation: Arc<AtomicU64>,
     audio_ready: Arc<AtomicBool>,
+    active_audio_device: Arc<Mutex<ActiveAudioDevice>>,
+    manual_capture: Arc<AtomicU8>,
     listening: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     metrics: CoreMetrics,
@@ -72,8 +80,16 @@ struct DaemonContext {
 enum PipelineMessage {
     WakeWord,
     Command(TranscriptionRequest),
+    CaptureCancelled,
+    AudioDeviceChanged(Option<AudioDeviceInfo>),
     AudioError(String),
 }
+
+const MANUAL_CAPTURE_IDLE: u8 = 0;
+const MANUAL_CAPTURE_RESERVING: u8 = 1;
+const MANUAL_CAPTURE_BEGIN: u8 = 2;
+const MANUAL_CAPTURE_ACTIVE: u8 = 3;
+const MANUAL_CAPTURE_FINISH: u8 = 4;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -118,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         model: None,
     }));
     let audio_generation = Arc::new(AtomicU64::new(0));
+    let manual_capture = Arc::new(AtomicU8::new(MANUAL_CAPTURE_IDLE));
     let (process_shutdown, mut process_shutdown_rx) = watch::channel(false);
     let context = DaemonContext {
         runtime: runtime.clone(),
@@ -133,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
         audio_settings: Arc::clone(&audio_settings),
         audio_generation: Arc::clone(&audio_generation),
         audio_ready: Arc::clone(&audio_ready),
+        active_audio_device: Arc::new(Mutex::new(ActiveAudioDevice::default())),
+        manual_capture: Arc::clone(&manual_capture),
         listening: Arc::clone(&listening),
         stopping: Arc::clone(&stopping),
         metrics: metrics.clone(),
@@ -146,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         let listening = Arc::clone(&listening);
         let stopping = Arc::clone(&stopping);
         let ready = Arc::clone(&audio_ready);
+        let manual_capture = Arc::clone(&manual_capture);
         let metrics = metrics.clone();
         tokio::task::spawn_blocking(move || {
             audio_loop(
@@ -155,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
                 listening,
                 stopping,
                 ready,
+                manual_capture,
                 metrics,
             )
         })
@@ -172,6 +193,14 @@ async fn main() -> anyhow::Result<()> {
                     if let Err(error) = bridge_context.runtime.captured_audio(request).await {
                         tracing::warn!(%error, "command pipeline recovered");
                     }
+                }
+                PipelineMessage::CaptureCancelled => {
+                    if let Err(error) = bridge_context.runtime.cancel_capture().await {
+                        tracing::debug!(%error, "manual capture cancellation ignored");
+                    }
+                }
+                PipelineMessage::AudioDeviceChanged(device) => {
+                    set_active_audio_device(&bridge_context, device);
                 }
                 PipelineMessage::AudioError(message) => {
                     set_last_error(&bridge_context, Some(message.clone()));
@@ -327,6 +356,86 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
             }
             Err(error) => core_error(error),
         },
+        CoreRequest::BeginCapture => {
+            if !context.listening.load(Ordering::Acquire)
+                || !context.audio_ready.load(Ordering::Acquire)
+            {
+                return error_response(IpcErrorCode::Audio, "audio input is not ready");
+            }
+            if context
+                .manual_capture
+                .compare_exchange(
+                    MANUAL_CAPTURE_IDLE,
+                    MANUAL_CAPTURE_RESERVING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return error_response(
+                    IpcErrorCode::RuntimeBusy,
+                    "manual capture is already active",
+                );
+            }
+            match context.runtime.begin_manual_capture().await {
+                Ok(()) => {
+                    if context
+                        .manual_capture
+                        .compare_exchange(
+                            MANUAL_CAPTURE_RESERVING,
+                            MANUAL_CAPTURE_BEGIN,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        CoreResponse::Accepted
+                    } else {
+                        let _ = context.runtime.cancel_capture().await;
+                        error_response(
+                            IpcErrorCode::Audio,
+                            "audio input changed while starting manual capture",
+                        )
+                    }
+                }
+                Err(error) => {
+                    context
+                        .manual_capture
+                        .store(MANUAL_CAPTURE_IDLE, Ordering::Release);
+                    core_error(error)
+                }
+            }
+        }
+        CoreRequest::EndCapture => {
+            if context
+                .manual_capture
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                    matches!(
+                        state,
+                        MANUAL_CAPTURE_BEGIN | MANUAL_CAPTURE_ACTIVE | MANUAL_CAPTURE_FINISH
+                    )
+                    .then_some(MANUAL_CAPTURE_FINISH)
+                })
+                .is_ok()
+            {
+                CoreResponse::Accepted
+            } else {
+                error_response(IpcErrorCode::RuntimeBusy, "manual capture is not active")
+            }
+        }
+        CoreRequest::SubmitText { text } => {
+            if text.trim().is_empty() || text.len() > 4_096 {
+                error_response(
+                    IpcErrorCode::InvalidRequest,
+                    "submitted text must contain 1..=4096 UTF-8 bytes",
+                )
+            } else {
+                match context.runtime.submit_text(text).await {
+                    Ok(()) => CoreResponse::Accepted,
+                    Err(error) => core_error(error),
+                }
+            }
+        }
         CoreRequest::ConfirmCommand { confirmation_id } => {
             match context.runtime.confirm(confirmation_id).await {
                 Ok(()) => CoreResponse::Accepted,
@@ -735,6 +844,11 @@ fn health(context: &DaemonContext) -> HealthSnapshot {
         state: context.runtime.state(),
         core_version: CORE_VERSION.into(),
         audio_ready: context.audio_ready.load(Ordering::Acquire),
+        active_audio_device: context
+            .active_audio_device
+            .lock()
+            .ok()
+            .and_then(|state| state.device.clone()),
         model_ready: matches!(
             current_model_status(context),
             ModelStatus::Ready { .. } | ModelStatus::Loading { active: true, .. }
@@ -812,6 +926,27 @@ fn set_last_error(context: &DaemonContext, error: Option<String>) {
     }
 }
 
+fn set_active_audio_device(context: &DaemonContext, device: Option<AudioDeviceInfo>) {
+    let changed = context
+        .active_audio_device
+        .lock()
+        .map(|mut current| {
+            if current.observed && current.device == device {
+                false
+            } else {
+                current.observed = true;
+                current.device = device.clone();
+                true
+            }
+        })
+        .unwrap_or(false);
+    if changed {
+        context
+            .runtime
+            .publish_event(AssistantEvent::AudioDeviceChanged { device });
+    }
+}
+
 fn update_audio_settings(
     context: &DaemonContext,
     config: Arc<CoreConfig>,
@@ -847,6 +982,10 @@ fn error_response(code: IpcErrorCode, error: impl std::fmt::Display) -> CoreResp
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the worker receives independent shared lifecycle and audio signals"
+)]
 fn audio_loop(
     settings: Arc<RwLock<AudioSettings>>,
     generation: Arc<AtomicU64>,
@@ -854,6 +993,7 @@ fn audio_loop(
     listening: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
+    manual_capture: Arc<AtomicU8>,
     metrics: CoreMetrics,
 ) -> Result<(), String> {
     while !stopping.load(Ordering::Acquire) {
@@ -891,17 +1031,20 @@ fn audio_loop(
             &listening,
             &stopping,
             &ready,
+            &manual_capture,
             &metrics,
             &generation,
             current_generation,
         ) {
             Ok(SessionEnd::Stopped) => return Ok(()),
-            Ok(SessionEnd::Reconfigured) => continue,
+            Ok(SessionEnd::Reconfigured | SessionEnd::InputChanged) => continue,
             Err(error) => {
                 ready.store(false, Ordering::Release);
+                manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 if stopping.load(Ordering::Acquire) {
                     return Ok(());
                 }
+                let _ = commands.blocking_send(PipelineMessage::AudioDeviceChanged(None));
                 let _ = commands.blocking_send(PipelineMessage::AudioError(error));
                 metrics.audio_reconnected();
                 std::thread::sleep(Duration::from_millis(
@@ -917,6 +1060,7 @@ fn audio_loop(
 enum SessionEnd {
     Stopped,
     Reconfigured,
+    InputChanged,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -927,6 +1071,7 @@ fn audio_session(
     listening: &AtomicBool,
     stopping: &AtomicBool,
     ready: &AtomicBool,
+    manual_capture: &AtomicU8,
     metrics: &CoreMetrics,
     generation: &AtomicU64,
     expected_generation: u64,
@@ -937,6 +1082,11 @@ fn audio_session(
         metrics.clone(),
     )
     .map_err(|error| error.to_string())?;
+    commands
+        .blocking_send(PipelineMessage::AudioDeviceChanged(Some(
+            input.device().clone(),
+        )))
+        .map_err(|_| "runtime command queue closed".to_string())?;
     ready.store(true, Ordering::Release);
     let target_rate = config.audio.target_sample_rate;
     let frame_samples = samples_for_ms(target_rate, config.audio.frame_ms);
@@ -950,11 +1100,30 @@ fn audio_session(
     );
     let mut cooldown_until = Instant::now();
     let mut last_audio = Instant::now();
+    let mut last_device_check = Instant::now();
 
     while !stopping.load(Ordering::Acquire) {
         if generation.load(Ordering::Acquire) != expected_generation {
             ready.store(false, Ordering::Release);
             return Ok(SessionEnd::Reconfigured);
+        }
+        // ponytail: poll once per second; use IMMNotificationClient if sub-second switching matters.
+        if config.audio.device_id == "default"
+            && last_device_check.elapsed() >= Duration::from_secs(1)
+        {
+            last_device_check = Instant::now();
+            let current = default_input_device().map_err(|error| error.to_string())?;
+            if should_reopen_default(&config.audio.device_id, &input.device().id, &current.id) {
+                ready.store(false, Ordering::Release);
+                let manual_active = manual_capture.swap(MANUAL_CAPTURE_IDLE, Ordering::AcqRel)
+                    != MANUAL_CAPTURE_IDLE;
+                if pipeline.is_collecting() || manual_active {
+                    commands
+                        .blocking_send(PipelineMessage::CaptureCancelled)
+                        .map_err(|_| "runtime command queue closed".to_string())?;
+                }
+                return Ok(SessionEnd::InputChanged);
+            }
         }
         let block = input
             .recv_timeout(Duration::from_millis(250))
@@ -974,9 +1143,46 @@ fn audio_session(
             if !listening.load(Ordering::Acquire) {
                 pipeline.reset();
                 detector.reset();
+                manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 continue;
             }
-            let detected = if !pipeline.is_collecting() && Instant::now() >= cooldown_until {
+            let manual_state = manual_capture.load(Ordering::Acquire);
+            if manual_state == MANUAL_CAPTURE_BEGIN {
+                if manual_capture
+                    .compare_exchange(
+                        MANUAL_CAPTURE_BEGIN,
+                        MANUAL_CAPTURE_ACTIVE,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    pipeline.start_manual();
+                    detector.reset();
+                }
+            } else if manual_state == MANUAL_CAPTURE_FINISH {
+                if !pipeline.is_collecting() {
+                    pipeline.start_manual();
+                }
+                let captured = pipeline.finish();
+                manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
+                let message = captured.map_or(PipelineMessage::CaptureCancelled, |samples| {
+                    PipelineMessage::Command(TranscriptionRequest {
+                        samples,
+                        sample_rate: target_rate,
+                    })
+                });
+                commands
+                    .blocking_send(message)
+                    .map_err(|_| "runtime command queue closed".to_string())?;
+                cooldown_until =
+                    Instant::now() + Duration::from_millis(config.wake_word.cooldown_ms);
+                continue;
+            }
+            let detected = if manual_capture.load(Ordering::Acquire) == MANUAL_CAPTURE_IDLE
+                && !pipeline.is_collecting()
+                && Instant::now() >= cooldown_until
+            {
                 let started = Instant::now();
                 let detected = detector.process(&frame).is_some();
                 metrics.observe_kws(started.elapsed().as_micros() as u64);
@@ -990,6 +1196,7 @@ fn audio_session(
                 false
             };
             if let Some(samples) = pipeline.push(&frame, detected) {
+                manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 commands
                     .blocking_send(PipelineMessage::Command(TranscriptionRequest {
                         samples,
@@ -1005,6 +1212,10 @@ fn audio_session(
     Ok(SessionEnd::Stopped)
 }
 
+fn should_reopen_default(configured_id: &str, active_id: &str, current_default_id: &str) -> bool {
+    configured_id == "default" && active_id != current_default_id
+}
+
 fn samples_for_ms(sample_rate: u32, milliseconds: u32) -> usize {
     (u64::from(sample_rate) * u64::from(milliseconds) / 1_000) as usize
 }
@@ -1017,6 +1228,25 @@ mod tests {
     fn millisecond_conversion_is_exact_for_canonical_audio() {
         assert_eq!(samples_for_ms(16_000, 20), 320);
         assert_eq!(samples_for_ms(16_000, 900), 14_400);
+    }
+
+    #[test]
+    fn only_a_changed_default_device_reopens_the_session() {
+        assert!(should_reopen_default(
+            "default",
+            "microphone-a",
+            "microphone-b"
+        ));
+        assert!(!should_reopen_default(
+            "default",
+            "microphone-a",
+            "microphone-a"
+        ));
+        assert!(!should_reopen_default(
+            "microphone-a",
+            "microphone-a",
+            "microphone-b"
+        ));
     }
 
     #[test]

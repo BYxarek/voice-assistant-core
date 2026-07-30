@@ -14,6 +14,7 @@ use crate::{
         ConfirmationCancelReason, CoreError, SpeechRecognizer, Transcript, TranscriptionRequest,
     },
     metrics::CoreMetrics,
+    service::RuntimeUpdate,
 };
 
 struct PendingCommand {
@@ -344,7 +345,7 @@ impl Runtime {
         self.cooldown
     }
 
-    /// Replaces adapters and policy after validated atomic config reload.
+    /// Replaces the complete adapter set after validated config reload.
     #[allow(clippy::too_many_arguments)]
     pub fn reconfigure(
         &mut self,
@@ -356,23 +357,47 @@ impl Runtime {
         stt_timeout: Duration,
         cooldown: Duration,
     ) -> Result<(), CoreError> {
+        self.reconfigure_partial(RuntimeUpdate {
+            recognizer: Some(recognizer),
+            commands: Some((registry, executor)),
+            wake_word: Some(wake_word),
+            policy: Some(policy),
+            stt_timeout: Some(stt_timeout),
+            cooldown: Some(cooldown),
+        })
+    }
+
+    /// Replaces only supplied adapters and policy after validated config reload.
+    pub fn reconfigure_partial(&mut self, update: RuntimeUpdate) -> Result<(), CoreError> {
         if self.state == AssistantState::AwaitingConfirmation {
             self.cancel_pending(ConfirmationCancelReason::Reconfigured)?;
             self.complete_cooldown()?;
         }
         if !matches!(
             self.state,
-            AssistantState::IdleListening | AssistantState::Suspended
+            AssistantState::Starting | AssistantState::IdleListening | AssistantState::Suspended
         ) {
             return Err(CoreError::Busy("configuration reload".into()));
         }
-        self.recognizer = recognizer;
-        self.registry = registry;
-        self.executor = executor;
-        self.wake_word = wake_word;
-        self.policy = policy;
-        self.stt_timeout = stt_timeout;
-        self.cooldown = cooldown;
+        if let Some(recognizer) = update.recognizer {
+            self.recognizer = recognizer;
+        }
+        if let Some((registry, executor)) = update.commands {
+            self.registry = registry;
+            self.executor = executor;
+        }
+        if let Some(wake_word) = update.wake_word {
+            self.wake_word = wake_word;
+        }
+        if let Some(policy) = update.policy {
+            self.policy = policy;
+        }
+        if let Some(stt_timeout) = update.stt_timeout {
+            self.stt_timeout = stt_timeout;
+        }
+        if let Some(cooldown) = update.cooldown {
+            self.cooldown = cooldown;
+        }
         Ok(())
     }
 

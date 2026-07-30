@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Readiness and compatibility information returned to applications.
@@ -43,6 +43,15 @@ pub enum ModelStatus {
         /// Current or most recently completed relative file.
         file: Option<String>,
     },
+    /// A verified model is being loaded into the native STT engine.
+    Loading {
+        /// Coarse completion percentage.
+        progress: u8,
+        /// Stable user-visible loading stage.
+        stage: String,
+        /// Whether the previous recognizer remains active during replacement.
+        active: bool,
+    },
     /// A verified revision is active.
     Ready {
         /// Pinned model commit SHA.
@@ -53,7 +62,7 @@ pub enum ModelStatus {
         /// User-visible failure description.
         message: String,
     },
-    /// The last installation was cancelled cooperatively.
+    /// The last installation or STT loading was cancelled cooperatively.
     Cancelled,
 }
 
@@ -213,6 +222,13 @@ pub enum AssistantEvent {
         total_files: usize,
         /// Current relative file, if any.
         file: Option<String>,
+    },
+    /// Native STT initialization advanced to a new stage.
+    ModelLoadProgress {
+        /// Coarse completion percentage.
+        progress: u8,
+        /// Stable user-visible loading stage.
+        stage: String,
     },
     /// A verified model revision became active.
     ModelReady {

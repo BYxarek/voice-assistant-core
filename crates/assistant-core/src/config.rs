@@ -12,7 +12,7 @@ use crate::commands::{HandlerRegistry, normalize};
 /// Current on-disk and IPC configuration schema.
 pub const CURRENT_CONFIG_VERSION: u16 = 2;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 /// Complete versioned core configuration.
 pub struct CoreConfig {
@@ -41,7 +41,7 @@ pub struct CoreConfig {
     pub commands: Vec<CommandConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 /// Audio capture, buffering, VAD and recovery settings.
 pub struct AudioConfig {
@@ -90,7 +90,7 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 /// Transcript normalization settings.
 pub struct MatchingConfig {
@@ -104,7 +104,7 @@ impl Default for MatchingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 /// Open-vocabulary wake-word detector settings.
 pub struct WakeWordConfig {
@@ -129,7 +129,7 @@ impl Default for WakeWordConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 /// Native STT worker limits.
 pub struct InferenceConfig {
@@ -151,7 +151,7 @@ impl Default for InferenceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 /// Confirmation policy shared by all commands.
 pub struct PolicyConfig {
@@ -189,7 +189,7 @@ impl Default for IpcConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 /// One exact-match command and its typed handler parameters.
 pub struct CommandConfig {

@@ -62,12 +62,34 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
         CoreResponse::Health { health } => health,
         response => panic!("unexpected health response: {response:?}"),
     };
-    assert_eq!(health.state, AssistantState::IdleListening);
+    assert!(matches!(
+        health.state,
+        AssistantState::Starting | AssistantState::IdleListening
+    ));
     assert_eq!(health.core_version, CORE_VERSION);
     assert!(!health.model_ready);
     assert_eq!(health.config_version, CURRENT_CONFIG_VERSION);
     assert_eq!(health.core_api_version, CORE_API_VERSION);
     assert_eq!(health.protocol_version, PROTOCOL_VERSION);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.request(CoreRequest::GetStatus).await.unwrap() {
+            CoreResponse::Status {
+                state: AssistantState::IdleListening,
+            } => break,
+            CoreResponse::Status {
+                state: AssistantState::Starting,
+            } => {
+                assert!(
+                    Instant::now() < deadline,
+                    "daemon did not complete initialization"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            response => panic!("unexpected startup response: {response:?}"),
+        }
+    }
 
     assert!(matches!(
         client.request(CoreRequest::SuspendListening).await.unwrap(),

@@ -1,4 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig};
@@ -28,6 +34,25 @@ impl SherpaOnnxRecognizer {
         queue_capacity: usize,
         metrics: CoreMetrics,
     ) -> Result<Self, CoreError> {
+        Self::new_with_control(
+            model_directory,
+            threads,
+            queue_capacity,
+            metrics,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+        )
+    }
+
+    /// Loads the native engine with cooperative cancellation and coarse progress.
+    pub fn new_with_control(
+        model_directory: impl Into<PathBuf>,
+        threads: i32,
+        queue_capacity: usize,
+        metrics: CoreMetrics,
+        cancelled: Arc<AtomicBool>,
+        mut progress: impl FnMut(u8, &'static str) + Send + 'static,
+    ) -> Result<Self, CoreError> {
         let model_directory = model_directory.into();
         for path in [
             "am-onnx/encoder.int8.onnx",
@@ -48,21 +73,44 @@ impl SherpaOnnxRecognizer {
         }
 
         let (jobs, mut receiver) = mpsc::channel::<RecognitionJob>(queue_capacity);
+        let (ready, initialized) = std::sync::mpsc::sync_channel(1);
         let worker_metrics = metrics.clone();
         std::thread::Builder::new()
             .name("assistant-stt".into())
             .spawn(move || {
+                progress(25, "validating model");
+                if cancelled.load(Ordering::Acquire) {
+                    let _ = ready.send(Err("STT loading cancelled".into()));
+                    return;
+                }
+                progress(50, "initializing STT engine");
                 let recognizer = create_recognizer(&model_directory, threads.max(1));
-                while let Some(job) = receiver.blocking_recv() {
-                    worker_metrics.stt_dequeued();
-                    let result = match &recognizer {
-                        Ok(recognizer) => recognize(recognizer, job.request),
-                        Err(message) => Err(CoreError::Recognition(message.clone())),
-                    };
-                    let _ = job.response.send(result);
+                if cancelled.load(Ordering::Acquire) {
+                    let _ = ready.send(Err("STT loading cancelled".into()));
+                    return;
+                }
+                match recognizer {
+                    Ok(recognizer) => {
+                        progress(100, "STT engine ready");
+                        if ready.send(Ok(())).is_err() {
+                            return;
+                        }
+                        while let Some(job) = receiver.blocking_recv() {
+                            worker_metrics.stt_dequeued();
+                            let result = recognize(&recognizer, job.request);
+                            let _ = job.response.send(result);
+                        }
+                    }
+                    Err(message) => {
+                        let _ = ready.send(Err(message));
+                    }
                 }
             })
             .map_err(|error| CoreError::Recognition(error.to_string()))?;
+        initialized
+            .recv()
+            .map_err(|_| CoreError::Recognition("STT loading worker stopped".into()))?
+            .map_err(CoreError::Recognition)?;
         Ok(Self { jobs, metrics })
     }
 }

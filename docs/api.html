@@ -22,7 +22,7 @@
 <a class="skip" href="#main">К содержанию</a><div class="progress" id="progress"></div>
 <div class="layout">
   <aside class="sidebar">
-    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.0.0 · Public API v1</span></span></a>
+    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.0.1 · Public API v1</span></span></a>
     <div class="search-wrap"><label class="sr-only" for="search">Поиск</label><input id="search" class="search" type="search" placeholder="Поиск по API…" autocomplete="off"><span class="search-key">/</span></div>
     <div class="nav-title">Содержание</div><nav class="nav" aria-label="Разделы API"><a href="#section-1" data-nav="section-1"><span>01</span>Версии, Cargo features и платформы</a>
 <a href="#section-2" data-nav="section-2"><span>02</span>Публичные модули</a>
@@ -34,7 +34,7 @@
 <a href="#section-8" data-nav="section-8"><span>08</span>Audio API</a>
 <a href="#section-9" data-nav="section-9"><span>09</span>Конфигурация schema v2</a>
 <a href="#section-10" data-nav="section-10"><span>10</span>Model API</a>
-<a href="#section-11" data-nav="section-11"><span>11</span>IPC wire protocol v1</a>
+<a href="#section-11" data-nav="section-11"><span>11</span>IPC wire protocol v2</a>
 <a href="#section-12" data-nav="section-12"><span>12</span>Ошибки</a>
 <a href="#section-13" data-nav="section-13"><span>13</span>Метрики</a>
 <a href="#section-14" data-nav="section-14"><span>14</span>Daemon</a>
@@ -56,7 +56,7 @@
 <li>default feature <code>model-source-huggingface</code> включает установку модели.</li>
 <li>feature <code>stt-sherpa-onnx</code> включает <code>SherpaOnnxRecognizer</code> и wake-word API.</li>
 </ul>
-<p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>. Добавление необязательного поля Serde или нового запроса, который старый клиент не отправляет, допускается внутри protocol v1.</p>
+<p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>. Добавление необязательного поля Serde или нового запроса, который старый клиент не отправляет, допускается внутри protocol v2.</p>
 </section>
 <section id="section-2" class="doc-section searchable"><div class="section-kicker">Раздел 2</div><h2>Публичные модули</h2>
 <div class="table-wrap"><table><thead><tr><th>Модуль</th><th>Назначение</th></tr></thead><tbody><tr><td><code>audio</code></td><td>устройства CPAL, bounded input, WAV, downmix и resampling</td></tr><tr><td><code>commands</code></td><td>нормализация, exact matching, handler schema и registry</td></tr><tr><td><code>config</code></td><td>schema v2, миграция, валидация, AppData и atomic save</td></tr><tr><td><code>domain</code></td><td>состояния, события, запросы STT, результаты и ошибки</td></tr><tr><td><code>ipc</code></td><td>JSON envelope и Windows Named Pipe transport/client</td></tr><tr><td><code>metrics</code></td><td>lock-free counters, latency, CPU time и working set</td></tr><tr><td><code>models</code></td><td>pinned download, manifest, SHA-256, cancel и atomic activation</td></tr><tr><td><code>runtime</code></td><td>синхронная машина состояний и обработка одной команды</td></tr><tr><td><code>service</code></td><td>рекомендуемый dedicated task и cloneable handle</td></tr><tr><td><code>signal</code></td><td>VAD, pre-roll ring и bounded command collector</td></tr><tr><td><code>stt</code></td><td>persistent sherpa-onnx worker</td></tr><tr><td><code>wakeword</code></td><td>streaming open-vocabulary KWS</td></tr></tbody></table></div>
@@ -215,7 +215,7 @@ handlers.register(Arc::new(SetVolume))?;
 ├── assistant.toml
 ├── models\
 └── logs\</code></pre></div>
-<p><code>ensure_directories</code> создаёт каталоги. Параметры можно переопределить аргументами daemon/CLI. Изменение IPC pipe во время <code>ApplyConfig</code> требует перезапуска.</p>
+<p><code>ensure_directories</code> создаёт каталоги. Параметры можно переопределить аргументами daemon/CLI. <code>ApplyConfig</code> использует <code>RuntimeUpdate</code> и меняет только затронутые компоненты: команды, подтверждения и микрофон не пересоздают STT. Изменение IPC pipe требует перезапуска.</p>
 </section>
 <section id="section-10" class="doc-section searchable"><div class="section-kicker">Раздел 10</div><h2>Model API</h2>
 <p>Stock source:</p>
@@ -227,9 +227,9 @@ handlers.register(Arc::new(SetVolume))?;
 <p><code>ModelManager</code>:</p>
 <div class="table-wrap"><table><thead><tr><th>Метод</th><th>Результат</th></tr></thead><tbody><tr><td><code>new(root)</code></td><td>создаёт manager без I/O</td></tr><tr><td><code>install_alphacep_streaming_ru</code></td><td>устанавливает либо возвращает verified revision</td></tr><tr><td><code>install_alphacep_streaming_ru_with_control</code></td><td>то же с <code>AtomicBool</code> cancel и progress callback</td></tr><tr><td><code>resolve_alphacep_streaming_ru</code></td><td>offline resolve + verify</td></tr><tr><td><code>verify(directory)</code></td><td>проверяет metadata, safe relative paths, sizes и SHA-256</td></tr></tbody></table></div>
 <p>Установка копирует только <code>ALPHACEP_STREAMING_RU_FILES</code>, создаёт <code>ModelManifest</code>, проверяет temporary directory и активирует rename. Повреждённая установка помещается в quarantine и восстанавливается при неудачной замене. Cancel проверяется между файлами и до activation. Remote scripts не выполняются.</p>
-<p><code>ModelStatus</code>: <code>missing</code>, <code>installing</code>, <code>ready</code>, <code>failed</code>, <code>cancelled</code>. <code>ModelError</code>: <code>Io</code>, <code>Hub</code>, <code>Manifest</code>, <code>Verification</code>, <code>Cancelled</code>.</p>
+<p><code>ModelStatus</code>: <code>missing</code>, <code>installing</code>, <code>loading</code>, <code>ready</code>, <code>failed</code>, <code>cancelled</code>. IPC запускается до blocking-загрузки STT, поэтому GUI видит <code>Starting</code>, текущий процент и <code>ModelLoadProgress</code>; shutdown и cancel отменяют загрузку кооперативно. <code>ModelError</code>: <code>Io</code>, <code>Hub</code>, <code>Manifest</code>, <code>Verification</code>, <code>Cancelled</code>.</p>
 </section>
-<section id="section-11" class="doc-section searchable"><div class="section-kicker">Раздел 11</div><h2>IPC wire protocol v1</h2>
+<section id="section-11" class="doc-section searchable"><div class="section-kicker">Раздел 11</div><h2>IPC wire protocol v2</h2>
 <p>Transport — <code>\\.\pipe\&lt;pipe_name&gt;</code>. Сервер:</p>
 <ul>
 <li>запрещает remote clients;</li>
@@ -243,7 +243,7 @@ handlers.register(Arc::new(SetVolume))?;
 <div class="code-block"><div class="code-head"><span>text</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-text">u32 little-endian JSON length
 UTF-8 JSON Envelope</code></pre></div>
 <div class="code-block"><div class="code-head"><span>json</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-json">{
-  &quot;protocol_version&quot;: 1,
+  &quot;protocol_version&quot;: 2,
   &quot;request_id&quot;: &quot;ui-42&quot;,
   &quot;payload&quot;: { &quot;type&quot;: &quot;get_health&quot; }
 }</code></pre></div>

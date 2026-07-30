@@ -9,8 +9,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.0.0**. Публичный Rust extension API v1 и IPC
-protocol v1 готовы для разработки приложений. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.0.1**. Публичный Rust extension API v1 и IPC
+protocol v2 готовы для разработки приложений. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -29,12 +29,13 @@ inference изолированы от GUI.
 
 - bounded audio pipeline: CPAL → mono → 16 кГц → KWS → VAD → STT;
 - отдельная задача runtime и отдельный persistent STT worker;
+- IPC доступен в состоянии `Starting`, пока cancellable blocking worker загружает STT и публикует прогресс;
 - восстановление микрофона после ошибки или зависания callback;
 - типизированные обработчики команд без передачи текста в shell;
 - одноразовый `confirmation_id`, timeout и полное отключение подтверждений;
 - запуск без модели, установка/отмена/проверка модели во время работы;
 - pinned model revision, SHA-256 manifest и атомарная активация;
-- атомарное применение и миграция конфигурации;
+- дифференциальное применение конфигурации без перезагрузки незатронутых компонентов;
 - локальный versioned Named Pipe IPC и готовый Rust-клиент;
 - health, состояние модели, события, очереди, задержки, CPU time и RAM через IPC;
 - CLI для диагностики, проверки WAV и soak-теста.
@@ -86,7 +87,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 `CORE_API_VERSION` равен `1`. В v1 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
-- `RuntimeComponents`, `RuntimeHandle`, `RuntimeTask`,
+- `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
   `spawn_runtime_service` — embedding API;
 - `CoreIpcClient`, `EventSubscription`, `CoreRequest`, `CoreResponse`,
   `Envelope`, `IpcErrorCode` — IPC API;
@@ -94,7 +95,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v1; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v2; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -137,7 +138,7 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v1
+## IPC protocol v2
 
 Pipe по умолчанию: `\\.\pipe\voice-assistant-core`. Сервер допускает только
 локальных клиентов, защищён DACL и разрешает один daemon на pipe. Каждый JSON
@@ -156,10 +157,10 @@ envelope имеет `protocol_version`, `request_id`, `payload` и little-endian
 кратковременное подключение. `subscribe_events` создаёт отдельный
 `EventSubscription`. Ошибки имеют стабильный `IpcErrorCode`.
 
-Применение конфигурации выполняется только из `Idle`/`Suspended`. Конфигурация
-сначала мигрируется и проверяется вместе со схемами handlers, затем runtime
-переконфигурируется и файл заменяется атомарно. Параметры pipe требуют
-перезапуска daemon.
+Применение конфигурации выполняется только из `Idle`/`Suspended`. После миграции
+и проверки runtime меняет только затронутые компоненты: команды, подтверждения
+и микрофон не пересоздают STT; новый STT worker нужен только при изменении его
+threads/queue. Файл заменяется атомарно, параметры pipe требуют перезапуска daemon.
 
 ## Команды и безопасность
 

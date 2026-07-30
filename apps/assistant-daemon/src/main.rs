@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,7 +11,7 @@ use std::{
 use assistant_core::{
     AppPaths, AssistantEvent, AssistantState, CORE_API_VERSION, CORE_VERSION, CommandExecutor,
     CommandRegistry, CoreConfig, CoreError, CoreMetrics, HealthSnapshot, ModelStatus,
-    PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle, SpeechRecognizer,
+    PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle, RuntimeUpdate, SpeechRecognizer,
     TranscriptionRequest, UnavailableRecognizer,
     audio::{AudioInput, resample_linear},
     builtin_handlers,
@@ -56,6 +56,9 @@ struct DaemonContext {
     model_status: Arc<Mutex<ModelStatus>>,
     model_cancel: Arc<AtomicBool>,
     model_installing: Arc<AtomicBool>,
+    stt_cancel: Arc<AtomicBool>,
+    stt_loading: Arc<AtomicBool>,
+    apply_lock: Arc<tokio::sync::Mutex<()>>,
     audio_settings: Arc<RwLock<AudioSettings>>,
     audio_generation: Arc<AtomicU64>,
     audio_ready: Arc<AtomicBool>,
@@ -87,11 +90,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let config = Arc::new(CoreConfig::load(&config_path)?);
     let model_manager = ModelManager::new(model_root);
-    let model = model_manager.resolve_alphacep_streaming_ru().ok();
     let metrics = CoreMetrics::default();
-    let components = build_runtime_components(&config, model.as_deref(), &metrics)?;
     validate_stock_config(&config)?;
-    let mut runtime = Runtime::new(
+    let components = build_runtime_components_without_stt(&config)?;
+    let runtime = Runtime::new(
         components.recognizer,
         components.commands,
         components.executor,
@@ -101,21 +103,19 @@ async fn main() -> anyhow::Result<()> {
         components.cooldown,
         metrics.clone(),
     );
-    runtime.start()?;
     let (runtime, runtime_task) =
         spawn_runtime_service(runtime, config.inference.queue_capacity.max(8))?;
-    let model_status = match &model {
-        Some(_) => ModelStatus::Ready {
-            revision: ALPHACEP_STREAMING_RU_REVISION.into(),
-        },
-        None => ModelStatus::Missing,
+    let model_status = ModelStatus::Loading {
+        progress: 0,
+        stage: "locating model".into(),
+        active: false,
     };
-    let listening = Arc::new(AtomicBool::new(true));
+    let listening = Arc::new(AtomicBool::new(false));
     let stopping = Arc::new(AtomicBool::new(false));
     let audio_ready = Arc::new(AtomicBool::new(false));
     let audio_settings = Arc::new(RwLock::new(AudioSettings {
         config: Arc::clone(&config),
-        model,
+        model: None,
     }));
     let audio_generation = Arc::new(AtomicU64::new(0));
     let (process_shutdown, mut process_shutdown_rx) = watch::channel(false);
@@ -127,6 +127,9 @@ async fn main() -> anyhow::Result<()> {
         model_status: Arc::new(Mutex::new(model_status)),
         model_cancel: Arc::new(AtomicBool::new(false)),
         model_installing: Arc::new(AtomicBool::new(false)),
+        stt_cancel: Arc::new(AtomicBool::new(false)),
+        stt_loading: Arc::new(AtomicBool::new(false)),
+        apply_lock: Arc::new(tokio::sync::Mutex::new(())),
         audio_settings: Arc::clone(&audio_settings),
         audio_generation: Arc::clone(&audio_generation),
         audio_ready: Arc::clone(&audio_ready),
@@ -186,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         runtime.event_sender(),
     );
     tokio::pin!(ipc);
+    let initialization = tokio::spawn(initialize_stt(context.clone()));
     let mut completed_audio = None;
     tracing::info!(
         config = %context.config_path.display(),
@@ -215,7 +219,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     stopping.store(true, Ordering::Release);
+    context.stt_cancel.store(true, Ordering::Release);
+    context.model_cancel.store(true, Ordering::Release);
     runtime.signal_shutdown();
+    initialization.abort();
     bridge.abort();
     let audio_result = match completed_audio {
         Some(result) => result,
@@ -292,8 +299,14 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
             if context.model_installing.load(Ordering::Acquire) {
                 context.model_cancel.store(true, Ordering::Release);
                 CoreResponse::Accepted
+            } else if context.stt_loading.load(Ordering::Acquire) {
+                context.stt_cancel.store(true, Ordering::Release);
+                CoreResponse::Accepted
             } else {
-                error_response(IpcErrorCode::Model, "no model installation is running")
+                error_response(
+                    IpcErrorCode::Model,
+                    "no model installation or loading is running",
+                )
             }
         }
         CoreRequest::VerifyModel => match verify_model(&context).await {
@@ -329,6 +342,8 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
         CoreRequest::SubscribeEvents => CoreResponse::Accepted,
         CoreRequest::Shutdown => {
             context.stopping.store(true, Ordering::Release);
+            context.stt_cancel.store(true, Ordering::Release);
+            context.model_cancel.store(true, Ordering::Release);
             context.runtime.signal_shutdown();
             context.process_shutdown.send_replace(true);
             CoreResponse::Accepted
@@ -351,6 +366,13 @@ async fn apply_config(
     ) {
         return Err((IpcErrorCode::RuntimeBusy, "runtime is busy".into()));
     }
+    let _guard = context.apply_lock.lock().await;
+    if !matches!(
+        context.runtime.state(),
+        AssistantState::IdleListening | AssistantState::Suspended
+    ) {
+        return Err((IpcErrorCode::RuntimeBusy, "runtime is busy".into()));
+    }
     let old = current_config(context).map_err(|error| (IpcErrorCode::Internal, error))?;
     if config.ipc != old.ipc {
         return Err((
@@ -359,17 +381,45 @@ async fn apply_config(
         ));
     }
     let model = current_model_path(context);
-    let components = build_runtime_components(&config, model.as_deref(), &context.metrics)
-        .map_err(|error| (IpcErrorCode::Configuration, error.to_string()))?;
-    context
-        .runtime
-        .reconfigure(components)
-        .await
-        .map_err(|error| (IpcErrorCode::RuntimeBusy, error.to_string()))?;
-    if let Err(error) = config.save_atomic(context.config_path.as_ref()) {
-        if let Ok(rollback) = build_runtime_components(&old, model.as_deref(), &context.metrics) {
-            let _ = context.runtime.reconfigure(rollback).await;
+    let model_ready = model.is_some();
+    let replace_stt = inference_worker_changed(&old, &config);
+    let recognizer = if replace_stt {
+        match model.as_deref() {
+            Some(path) => Some(
+                load_stt_recognizer(context, path.to_path_buf(), &config, true)
+                    .await
+                    .map_err(|error| (IpcErrorCode::Model, error))?,
+            ),
+            None => None,
         }
+    } else {
+        None
+    };
+    let update = build_runtime_update(&old, &config, recognizer).map_err(|error| {
+        restore_ready_status(context, replace_stt && model_ready);
+        (IpcErrorCode::Configuration, error.to_string())
+    })?;
+    if let Err(error) = context.runtime.reconfigure_partial(update).await {
+        restore_ready_status(context, replace_stt && model_ready);
+        return Err((IpcErrorCode::RuntimeBusy, error.to_string()));
+    }
+    if let Err(error) = config.save_atomic(context.config_path.as_ref()) {
+        let rollback_recognizer = if replace_stt {
+            match model.as_deref() {
+                Some(path) => load_stt_recognizer(context, path.to_path_buf(), &old, true)
+                    .await
+                    .ok(),
+                None => Some(Arc::new(UnavailableRecognizer {
+                    message: "speech model is not installed".into(),
+                }) as Arc<dyn SpeechRecognizer>),
+            }
+        } else {
+            None
+        };
+        if let Ok(rollback) = build_runtime_update(&config, &old, rollback_recognizer) {
+            let _ = context.runtime.reconfigure_partial(rollback).await;
+        }
+        restore_ready_status(context, replace_stt && model_ready);
         return Err((IpcErrorCode::Configuration, error.to_string()));
     }
     let config = Arc::new(config);
@@ -378,7 +428,11 @@ async fn apply_config(
         .write()
         .map_err(|_| (IpcErrorCode::Internal, "config lock poisoned".into()))? =
         Arc::clone(&config);
-    update_audio_settings(context, config, model);
+    let restart_audio = old.audio != config.audio || old.wake_word != config.wake_word;
+    update_audio_settings(context, config, model, restart_audio);
+    if replace_stt && model_ready {
+        set_model_ready(context);
+    }
     Ok(())
 }
 
@@ -420,13 +474,17 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
         match result {
             Ok(Ok(path)) => {
                 if let Err(error) = activate_model(&context, path).await {
-                    set_model_status(
-                        &context,
-                        ModelStatus::Failed {
-                            message: error.clone(),
-                        },
-                    );
-                    set_last_error(&context, Some(error));
+                    if context.stt_cancel.load(Ordering::Acquire) {
+                        set_model_status(&context, ModelStatus::Cancelled);
+                    } else {
+                        set_model_status(
+                            &context,
+                            ModelStatus::Failed {
+                                message: error.clone(),
+                            },
+                        );
+                        set_last_error(&context, Some(error));
+                    }
                 }
             }
             Ok(Err(ModelError::Cancelled)) => {
@@ -455,68 +513,176 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
     Ok(())
 }
 
+async fn initialize_stt(context: DaemonContext) {
+    match resolve_model(&context).await {
+        Ok(path) => {
+            if let Err(error) = activate_model(&context, path).await
+                && !context.stopping.load(Ordering::Acquire)
+            {
+                if context.stt_cancel.load(Ordering::Acquire) {
+                    set_model_status(&context, ModelStatus::Cancelled);
+                } else {
+                    set_model_status(
+                        &context,
+                        ModelStatus::Failed {
+                            message: error.clone(),
+                        },
+                    );
+                    set_last_error(&context, Some(error));
+                }
+            }
+        }
+        Err(_) => set_model_status(&context, ModelStatus::Missing),
+    }
+    if !context.stopping.load(Ordering::Acquire) {
+        if let Err(error) = context.runtime.start().await {
+            set_last_error(&context, Some(error.to_string()));
+        } else {
+            context.listening.store(true, Ordering::Release);
+        }
+    }
+}
+
+async fn resolve_model(context: &DaemonContext) -> Result<PathBuf, String> {
+    let manager = context.model_manager.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("assistant-model-resolve".into())
+        .spawn(move || {
+            let _ = sender.send(manager.resolve_alphacep_streaming_ru());
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .await
+        .map_err(|_| "model resolver stopped".to_string())?
+        .map_err(|error| error.to_string())
+}
+
+async fn load_stt_recognizer(
+    context: &DaemonContext,
+    path: PathBuf,
+    config: &CoreConfig,
+    active: bool,
+) -> Result<Arc<dyn SpeechRecognizer>, String> {
+    if context.stt_loading.swap(true, Ordering::AcqRel) {
+        return Err("STT loading is already running".into());
+    }
+    context.stt_cancel.store(false, Ordering::Release);
+    set_stt_load_progress(context, 5, "scheduling STT load", active);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let worker_context = context.clone();
+    let cancelled = Arc::clone(&context.stt_cancel);
+    let metrics = context.metrics.clone();
+    let threads = config.inference.threads;
+    let queue_capacity = config.inference.queue_capacity;
+    let worker = std::thread::Builder::new()
+        .name("assistant-stt-loader".into())
+        .spawn(move || {
+            let progress_context = worker_context.clone();
+            let result = SherpaOnnxRecognizer::new_with_control(
+                path,
+                threads,
+                queue_capacity,
+                metrics,
+                cancelled,
+                move |progress, stage| {
+                    set_stt_load_progress(&progress_context, progress, stage, active);
+                },
+            )
+            .map(|recognizer| Arc::new(recognizer) as Arc<dyn SpeechRecognizer>)
+            .map_err(|error| error.to_string());
+            worker_context.stt_loading.store(false, Ordering::Release);
+            let _ = sender.send(result);
+        });
+    if let Err(error) = worker {
+        context.stt_loading.store(false, Ordering::Release);
+        return Err(error.to_string());
+    }
+    let result = receiver
+        .await
+        .map_err(|_| "STT loading worker stopped".to_string())?;
+    if result.is_err() && active {
+        set_model_status(
+            context,
+            ModelStatus::Ready {
+                revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+            },
+        );
+    }
+    result
+}
+
+fn set_stt_load_progress(context: &DaemonContext, progress: u8, stage: &str, active: bool) {
+    set_model_status(
+        context,
+        ModelStatus::Loading {
+            progress,
+            stage: stage.into(),
+            active,
+        },
+    );
+    context
+        .runtime
+        .publish_event(AssistantEvent::ModelLoadProgress {
+            progress,
+            stage: stage.into(),
+        });
+}
+
 async fn activate_model(context: &DaemonContext, path: PathBuf) -> Result<(), String> {
+    let _guard = context.apply_lock.lock().await;
     let config = current_config(context)?;
     while !matches!(
         context.runtime.state(),
-        AssistantState::IdleListening | AssistantState::Suspended
+        AssistantState::Starting | AssistantState::IdleListening | AssistantState::Suspended
     ) {
+        if context.stopping.load(Ordering::Acquire) {
+            return Err("STT loading cancelled".into());
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let components = build_runtime_components(&config, Some(&path), &context.metrics)
-        .map_err(|error| error.to_string())?;
+    let recognizer = load_stt_recognizer(
+        context,
+        path.clone(),
+        &config,
+        current_model_path(context).is_some(),
+    )
+    .await?;
     context
         .runtime
-        .reconfigure(components)
+        .reconfigure_partial(RuntimeUpdate {
+            recognizer: Some(recognizer),
+            ..RuntimeUpdate::default()
+        })
         .await
         .map_err(|error| error.to_string())?;
-    update_audio_settings(context, config, Some(path));
-    let status = ModelStatus::Ready {
-        revision: ALPHACEP_STREAMING_RU_REVISION.into(),
-    };
-    set_model_status(context, status);
-    context.runtime.publish_event(AssistantEvent::ModelReady {
-        revision: ALPHACEP_STREAMING_RU_REVISION.into(),
-    });
-    set_last_error(context, None);
+    update_audio_settings(context, config, Some(path), true);
+    set_model_ready(context);
     Ok(())
 }
 
 async fn verify_model(context: &DaemonContext) -> Result<ModelStatus, String> {
-    let manager = context.model_manager.clone();
-    match tokio::task::spawn_blocking(move || manager.resolve_alphacep_streaming_ru()).await {
-        Ok(Ok(path)) => {
+    match resolve_model(context).await {
+        Ok(path) => {
             activate_model(context, path).await?;
             Ok(current_model_status(context))
         }
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     }
 }
 
-fn build_runtime_components(
+fn build_runtime_components_without_stt(
     config: &CoreConfig,
-    model: Option<&Path>,
-    metrics: &CoreMetrics,
 ) -> Result<RuntimeComponents, CoreError> {
     let handlers = builtin_handlers(&config.commands)?;
     config
         .validate_with_handlers(&handlers)
         .map_err(|error| CoreError::Command(error.to_string()))?;
     let executor: Arc<dyn CommandExecutor> = Arc::new(handlers);
-    let recognizer: Arc<dyn SpeechRecognizer> = match model {
-        Some(path) => Arc::new(SherpaOnnxRecognizer::new(
-            path,
-            config.inference.threads,
-            config.inference.queue_capacity,
-            metrics.clone(),
-        )?),
-        None => Arc::new(UnavailableRecognizer {
+    Ok(RuntimeComponents {
+        recognizer: Arc::new(UnavailableRecognizer {
             message: "speech model is not installed".into(),
         }),
-    };
-    Ok(RuntimeComponents {
-        recognizer,
         commands: CommandRegistry::new(config.commands.clone(), config.matching.normalize_yo),
         executor,
         wake_word: config.wake_word.keyword.clone(),
@@ -524,6 +690,38 @@ fn build_runtime_components(
         stt_timeout: Duration::from_millis(config.inference.timeout_ms),
         cooldown: Duration::from_millis(config.wake_word.cooldown_ms),
     })
+}
+
+fn build_runtime_update(
+    old: &CoreConfig,
+    new: &CoreConfig,
+    recognizer: Option<Arc<dyn SpeechRecognizer>>,
+) -> Result<RuntimeUpdate, CoreError> {
+    let commands = if old.commands != new.commands || old.matching != new.matching {
+        let handlers = builtin_handlers(&new.commands)?;
+        Some((
+            CommandRegistry::new(new.commands.clone(), new.matching.normalize_yo),
+            Arc::new(handlers) as Arc<dyn CommandExecutor>,
+        ))
+    } else {
+        None
+    };
+    Ok(RuntimeUpdate {
+        recognizer,
+        commands,
+        wake_word: (old.wake_word.keyword != new.wake_word.keyword)
+            .then(|| new.wake_word.keyword.clone()),
+        policy: (old.policy != new.policy).then(|| new.policy.clone()),
+        stt_timeout: (old.inference.timeout_ms != new.inference.timeout_ms)
+            .then(|| Duration::from_millis(new.inference.timeout_ms)),
+        cooldown: (old.wake_word.cooldown_ms != new.wake_word.cooldown_ms)
+            .then(|| Duration::from_millis(new.wake_word.cooldown_ms)),
+    })
+}
+
+fn inference_worker_changed(old: &CoreConfig, new: &CoreConfig) -> bool {
+    old.inference.threads != new.inference.threads
+        || old.inference.queue_capacity != new.inference.queue_capacity
 }
 
 fn validate_stock_config(config: &CoreConfig) -> Result<(), assistant_core::config::ConfigError> {
@@ -537,7 +735,10 @@ fn health(context: &DaemonContext) -> HealthSnapshot {
         state: context.runtime.state(),
         core_version: CORE_VERSION.into(),
         audio_ready: context.audio_ready.load(Ordering::Acquire),
-        model_ready: matches!(current_model_status(context), ModelStatus::Ready { .. }),
+        model_ready: matches!(
+            current_model_status(context),
+            ModelStatus::Ready { .. } | ModelStatus::Loading { active: true, .. }
+        ),
         config_version: CURRENT_CONFIG_VERSION,
         core_api_version: CORE_API_VERSION,
         protocol_version: PROTOCOL_VERSION,
@@ -581,16 +782,47 @@ fn set_model_status(context: &DaemonContext, status: ModelStatus) {
     }
 }
 
+fn set_model_ready(context: &DaemonContext) {
+    set_model_status(
+        context,
+        ModelStatus::Ready {
+            revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+        },
+    );
+    context.runtime.publish_event(AssistantEvent::ModelReady {
+        revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+    });
+    set_last_error(context, None);
+}
+
+fn restore_ready_status(context: &DaemonContext, ready: bool) {
+    if ready {
+        set_model_status(
+            context,
+            ModelStatus::Ready {
+                revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+            },
+        );
+    }
+}
+
 fn set_last_error(context: &DaemonContext, error: Option<String>) {
     if let Ok(mut current) = context.last_error.lock() {
         *current = error;
     }
 }
 
-fn update_audio_settings(context: &DaemonContext, config: Arc<CoreConfig>, model: Option<PathBuf>) {
+fn update_audio_settings(
+    context: &DaemonContext,
+    config: Arc<CoreConfig>,
+    model: Option<PathBuf>,
+    restart: bool,
+) {
     if let Ok(mut settings) = context.audio_settings.write() {
         *settings = AudioSettings { config, model };
-        context.audio_generation.fetch_add(1, Ordering::AcqRel);
+        if restart {
+            context.audio_generation.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -785,5 +1017,47 @@ mod tests {
     fn millisecond_conversion_is_exact_for_canonical_audio() {
         assert_eq!(samples_for_ms(16_000, 20), 320);
         assert_eq!(samples_for_ms(16_000, 900), 14_400);
+    }
+
+    #[test]
+    fn non_inference_config_changes_do_not_replace_stt() {
+        let old = CoreConfig::bundled_example().unwrap();
+        for changed in [
+            {
+                let mut config = old.clone();
+                config.commands[0].enabled = !config.commands[0].enabled;
+                config
+            },
+            {
+                let mut config = old.clone();
+                config.policy.confirmations_enabled = !config.policy.confirmations_enabled;
+                config
+            },
+            {
+                let mut config = old.clone();
+                config.audio.device_id = "another-device".into();
+                config
+            },
+        ] {
+            assert!(!inference_worker_changed(&old, &changed));
+            assert!(
+                build_runtime_update(&old, &changed, None)
+                    .unwrap()
+                    .recognizer
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn only_worker_inference_settings_replace_stt() {
+        let old = CoreConfig::bundled_example().unwrap();
+        let mut timeout = old.clone();
+        timeout.inference.timeout_ms += 1;
+        assert!(!inference_worker_changed(&old, &timeout));
+
+        let mut threads = old.clone();
+        threads.inference.threads += 1;
+        assert!(inference_worker_changed(&old, &threads));
     }
 }

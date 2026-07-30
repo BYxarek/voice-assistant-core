@@ -165,7 +165,7 @@ pub enum IpcClientError {
     UnexpectedResponse,
 }
 
-/// Serves concurrent, local-only IPC clients using protocol v1.
+/// Serves concurrent, local-only IPC clients using the current protocol.
 pub async fn serve_named_pipe(
     pipe_name: &str,
     io_timeout: Duration,

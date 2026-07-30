@@ -33,14 +33,32 @@ pub struct RuntimeComponents {
     pub cooldown: Duration,
 }
 
+/// Differential runtime update; omitted fields keep their active component.
+#[derive(Default)]
+pub struct RuntimeUpdate {
+    /// Replacement STT adapter.
+    pub recognizer: Option<Arc<dyn SpeechRecognizer>>,
+    /// Replacement command matcher and typed executor.
+    pub commands: Option<(CommandRegistry, Arc<dyn CommandExecutor>)>,
+    /// Replacement prefix removed before exact command matching.
+    pub wake_word: Option<String>,
+    /// Replacement confirmation behavior.
+    pub policy: Option<PolicyConfig>,
+    /// Replacement maximum duration of one recognizer request.
+    pub stt_timeout: Option<Duration>,
+    /// Replacement delay before returning from `Cooldown`.
+    pub cooldown: Option<Duration>,
+}
+
 enum Control {
+    Start(oneshot::Sender<Result<(), CoreError>>),
     BeginCapture(oneshot::Sender<Result<(), CoreError>>),
     Captured(TranscriptionRequest, oneshot::Sender<Result<(), CoreError>>),
     Suspend(oneshot::Sender<Result<(), CoreError>>),
     Resume(oneshot::Sender<Result<(), CoreError>>),
     Confirm(String, oneshot::Sender<Result<(), CoreError>>),
     Cancel(String, oneshot::Sender<Result<(), CoreError>>),
-    Reconfigure(RuntimeComponents, oneshot::Sender<Result<(), CoreError>>),
+    Reconfigure(RuntimeUpdate, oneshot::Sender<Result<(), CoreError>>),
     Recover(String, String),
     Publish(AssistantEvent),
     Shutdown(oneshot::Sender<Result<(), CoreError>>),
@@ -56,6 +74,11 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    /// Completes startup after required adapters have been initialized.
+    pub async fn start(&self) -> Result<(), CoreError> {
+        self.call(Control::Start).await
+    }
+
     /// Returns the latest state without locking or queueing behind inference.
     pub fn state(&self) -> AssistantState {
         *self.state.borrow()
@@ -126,11 +149,24 @@ impl RuntimeHandle {
         receiver.await.map_err(|_| stopped())?
     }
 
-    /// Atomically swaps validated runtime adapters and policy.
+    /// Atomically swaps a complete validated runtime adapter set.
     pub async fn reconfigure(&self, components: RuntimeComponents) -> Result<(), CoreError> {
+        self.reconfigure_partial(RuntimeUpdate {
+            recognizer: Some(components.recognizer),
+            commands: Some((components.commands, components.executor)),
+            wake_word: Some(components.wake_word),
+            policy: Some(components.policy),
+            stt_timeout: Some(components.stt_timeout),
+            cooldown: Some(components.cooldown),
+        })
+        .await
+    }
+
+    /// Atomically swaps only the supplied validated runtime components.
+    pub async fn reconfigure_partial(&self, update: RuntimeUpdate) -> Result<(), CoreError> {
         let (response, receiver) = oneshot::channel();
         self.controls
-            .send(Control::Reconfigure(components, response))
+            .send(Control::Reconfigure(update, response))
             .await
             .map_err(|_| stopped())?;
         receiver.await.map_err(|_| stopped())?
@@ -242,6 +278,9 @@ pub fn spawn_runtime_service(
                         break;
                     };
                     match control {
+                        Control::Start(response) => {
+                            let _ = response.send(runtime.start());
+                        }
                         Control::BeginCapture(response) => {
                             let _ = response.send(runtime.start_command_capture());
                         }
@@ -260,16 +299,8 @@ pub fn spawn_runtime_service(
                         Control::Cancel(id, response) => {
                             let _ = response.send(runtime.cancel_command(&id));
                         }
-                        Control::Reconfigure(components, response) => {
-                            let _ = response.send(runtime.reconfigure(
-                                components.recognizer,
-                                components.commands,
-                                components.executor,
-                                components.wake_word,
-                                components.policy,
-                                components.stt_timeout,
-                                components.cooldown,
-                            ));
+                        Control::Reconfigure(update, response) => {
+                            let _ = response.send(runtime.reconfigure_partial(update));
                         }
                         Control::Recover(component, message) => {
                             runtime.report_recoverable(&component, message);

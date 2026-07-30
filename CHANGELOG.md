@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1] — 2026-07-30
+
+### Изменено
+
+- IPC protocol v2 сообщает `Starting` и прогресс blocking-загрузки STT;
+- `ApplyConfig` дифференциально меняет только затронутые runtime-компоненты;
+- загрузка и замена STT поддерживают кооперативную отмену и отзывчивый shutdown.
+
 Все заметные изменения Voice Assistant Core документируются здесь. Проект
 следует [Semantic Versioning](https://semver.org/lang/ru/).
 
@@ -20,3 +28,4 @@
 - CI, Rustdoc и GitHub Pages документация.
 
 [1.0.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.0
+[1.0.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.1

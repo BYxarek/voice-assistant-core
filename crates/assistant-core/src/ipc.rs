@@ -48,7 +48,7 @@ pub enum CoreRequest {
         /// Candidate configuration.
         config: CoreConfig,
     },
-    /// Validates, reconfigures idle runtime and atomically persists.
+    /// Validates, differentially reconfigures idle runtime and atomically persists.
     ApplyConfig {
         /// Candidate configuration.
         config: CoreConfig,
@@ -61,7 +61,7 @@ pub enum CoreRequest {
     GetModelStatus,
     /// Starts pinned model installation if none is active.
     InstallModel,
-    /// Requests cooperative cancellation of active installation.
+    /// Requests cooperative cancellation of active installation or STT loading.
     CancelModelInstall,
     /// Verifies the installed pinned revision and activates it when possible.
     VerifyModel,
@@ -192,7 +192,7 @@ mod tests {
         let message = Envelope::new("golden-1", CoreRequest::GetStatus);
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
-            r#"{"protocol_version":1,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+            r#"{"protocol_version":2,"request_id":"golden-1","payload":{"type":"get_status"}}"#
         );
     }
 }

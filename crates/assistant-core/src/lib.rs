@@ -45,4 +45,6 @@ pub use ipc::windows::{CoreIpcClient, EventSubscription, IpcClientError};
 pub use ipc::{CoreRequest, CoreResponse, Envelope, IpcErrorCode};
 pub use metrics::{CoreMetrics, MetricsSnapshot};
 pub use runtime::{MockRecognizer, Runtime, UnavailableRecognizer};
-pub use service::{RuntimeComponents, RuntimeHandle, RuntimeTask, spawn_runtime_service};
+pub use service::{
+    RuntimeComponents, RuntimeHandle, RuntimeTask, RuntimeUpdate, spawn_runtime_service,
+};

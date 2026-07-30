@@ -29,7 +29,7 @@ jobs:
           Copy-Item docs\* _site -Recurse
           Copy-Item target\doc _site\rustdoc -Recurse
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
   deploy:

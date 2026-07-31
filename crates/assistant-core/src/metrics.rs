@@ -13,6 +13,8 @@ struct Counters {
     audio_reconnects: AtomicU64,
     stt_queue_depth: AtomicU64,
     stt_queue_max_depth: AtomicU64,
+    stt_restarts: AtomicU64,
+    stt_faults: AtomicU64,
     recoverable_errors: AtomicU64,
     commands_completed: AtomicU64,
     kws_last_us: AtomicU64,
@@ -42,6 +44,10 @@ pub struct MetricsSnapshot {
     pub stt_queue_depth: u64,
     /// Highest observed STT queue depth.
     pub stt_queue_max_depth: u64,
+    /// Native STT workers recreated by the supervisor.
+    pub stt_restarts: u64,
+    /// STT restart budgets exhausted.
+    pub stt_faults: u64,
     /// Recoverable component failures.
     pub recoverable_errors: u64,
     /// Successfully completed typed commands.
@@ -108,6 +114,21 @@ impl CoreMetrics {
         self.0.stt_queue_depth.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Resets current STT queue depth when a failed worker generation is abandoned.
+    pub fn reset_stt_queue(&self) {
+        self.0.stt_queue_depth.store(0, Ordering::Relaxed);
+    }
+
+    /// Counts one supervised STT worker replacement.
+    pub fn stt_restarted(&self) {
+        self.0.stt_restarts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts one exhausted STT restart budget.
+    pub fn stt_faulted(&self) {
+        self.0.stt_faults.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Counts one component recovery.
     pub fn recoverable_error(&self) {
         self.0.recoverable_errors.fetch_add(1, Ordering::Relaxed);
@@ -144,6 +165,8 @@ impl CoreMetrics {
             audio_reconnects: load(&self.0.audio_reconnects),
             stt_queue_depth: load(&self.0.stt_queue_depth),
             stt_queue_max_depth: load(&self.0.stt_queue_max_depth),
+            stt_restarts: load(&self.0.stt_restarts),
+            stt_faults: load(&self.0.stt_faults),
             recoverable_errors: load(&self.0.recoverable_errors),
             commands_completed: load(&self.0.commands_completed),
             kws_last_us: load(&self.0.kws_last_us),

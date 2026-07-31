@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::commands::{HandlerRegistry, normalize};
 
 /// Current on-disk and IPC configuration schema.
-pub const CURRENT_CONFIG_VERSION: u16 = 2;
+pub const CURRENT_CONFIG_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +110,8 @@ impl Default for MatchingConfig {
 pub struct WakeWordConfig {
     /// Phrase required before a command.
     pub keyword: String,
+    /// Additional phrases accepted by the same detector and command matcher.
+    pub aliases: Vec<String>,
     /// Keyword boosting score passed to sherpa-onnx.
     pub score: f32,
     /// Detector activation threshold.
@@ -122,6 +124,7 @@ impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
             keyword: "ассистент".into(),
+            aliases: Vec::new(),
             score: 1.5,
             threshold: 0.35,
             cooldown_ms: 1_200,
@@ -133,20 +136,26 @@ impl Default for WakeWordConfig {
 #[serde(default, deny_unknown_fields)]
 /// Native STT worker limits.
 pub struct InferenceConfig {
-    /// Native inference thread count.
+    /// Native inference thread count; zero selects the host parallelism automatically.
     pub threads: i32,
     /// Maximum queued STT requests.
     pub queue_capacity: usize,
     /// End-to-end STT request timeout.
     pub timeout_ms: u64,
+    /// Maximum automatic worker restarts before the component is faulted.
+    pub max_restarts: u32,
+    /// Initial exponential-backoff delay between worker restarts.
+    pub restart_backoff_ms: u64,
 }
 
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            threads: 4,
+            threads: 0,
             queue_capacity: 2,
             timeout_ms: 30_000,
+            max_restarts: 3,
+            restart_backoff_ms: 500,
         }
     }
 }
@@ -304,7 +313,7 @@ impl CoreConfig {
             .and_then(toml::Value::as_integer)
             .ok_or_else(|| ConfigError::Validation("schema_version is required".into()))?;
         match version {
-            1 => {
+            1 | 2 => {
                 value["schema_version"] = toml::Value::Integer(CURRENT_CONFIG_VERSION.into());
             }
             version if version == i64::from(CURRENT_CONFIG_VERSION) => {}
@@ -325,7 +334,7 @@ impl CoreConfig {
     /// Migrates an IPC-supplied configuration object to the current schema.
     pub fn migrate(mut self) -> Result<Self, ConfigError> {
         match self.schema_version {
-            1 => self.schema_version = CURRENT_CONFIG_VERSION,
+            1 | 2 => self.schema_version = CURRENT_CONFIG_VERSION,
             CURRENT_CONFIG_VERSION => {}
             version => {
                 return Err(ConfigError::Validation(format!(
@@ -408,8 +417,12 @@ impl CoreConfig {
                 "audio timing, queue capacity or VAD threshold is out of range".into(),
             ));
         }
-        if self.wake_word.keyword.trim().is_empty()
-            || !self.wake_word.score.is_finite()
+        let wake_words = std::iter::once(&self.wake_word.keyword).chain(&self.wake_word.aliases);
+        let mut normalized_wake_words = std::collections::HashSet::new();
+        if wake_words.clone().any(|word| {
+            let normalized = normalize(word, self.matching.normalize_yo);
+            normalized.is_empty() || !normalized_wake_words.insert(normalized)
+        }) || !self.wake_word.score.is_finite()
             || !self.wake_word.threshold.is_finite()
             || !(0.0..=1.0).contains(&self.wake_word.threshold)
             || self.wake_word.score <= 0.0
@@ -420,9 +433,11 @@ impl CoreConfig {
                 "wake word must be non-empty, score positive and threshold within 0..=1".into(),
             ));
         }
-        if !(1..=64).contains(&self.inference.threads)
+        if !(0..=64).contains(&self.inference.threads)
             || !(1..=64).contains(&self.inference.queue_capacity)
             || !(100..=300_000).contains(&self.inference.timeout_ms)
+            || self.inference.max_restarts > 20
+            || !(100..=60_000).contains(&self.inference.restart_backoff_ms)
         {
             return Err(ConfigError::Validation(
                 "inference threads, queue capacity or timeout is out of range".into(),
@@ -562,7 +577,7 @@ mod tests {
     #[test]
     fn schema_one_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 2",
+            "schema_version = 3",
             "schema_version = 1",
             1,
         );
@@ -570,6 +585,26 @@ mod tests {
             CoreConfig::from_toml_str(&text).unwrap().schema_version,
             CURRENT_CONFIG_VERSION
         );
+    }
+
+    #[test]
+    fn schema_two_is_migrated() {
+        let text = include_str!("../../../config/assistant.example.toml").replacen(
+            "schema_version = 3",
+            "schema_version = 2",
+            1,
+        );
+        assert_eq!(
+            CoreConfig::from_toml_str(&text).unwrap().schema_version,
+            CURRENT_CONFIG_VERSION
+        );
+    }
+
+    #[test]
+    fn duplicate_normalized_wake_word_alias_is_rejected() {
+        let mut config = valid_config();
+        config.wake_word.aliases = vec!["АССИСТЕНТ!".into()];
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0] — 2026-07-31
+
+### Добавлено
+
+- несколько wake-word aliases в одном streaming KWS detector;
+- IPC protocol v4 с `list_handlers` и component-level health;
+- ранняя потоковая STT-сессия: декодирование начинается сразу после wake word;
+- warm-up STT при загрузке и автоматический выбор inference threads при `threads = 0`;
+- watchdog STT worker, exponential backoff, ограниченный restart budget и fault metrics;
+- audio supervisor с exponential backoff и circuit breaker после повторных сбоев;
+- preflight установки модели: проверка write/rename и свободного места.
+
+### Изменено
+
+- версия конфигурации увеличена до schema v3;
+- публичный Rust extension API увеличен до v3, IPC — до protocol v4.
+
 ## [1.1.1] — 2026-07-31
 
 ### Добавлено
@@ -57,3 +74,4 @@
 [1.0.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.1
 [1.1.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.0
 [1.1.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.1
+[1.2.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.2.0

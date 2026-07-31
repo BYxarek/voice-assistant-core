@@ -33,6 +33,7 @@ enum CliCommand {
     },
     ValidateConfig,
     Status,
+    Handlers,
     Soak {
         #[arg(long, default_value_t = 60)]
         seconds: u64,
@@ -125,6 +126,24 @@ async fn main() -> anyhow::Result<()> {
                 response => anyhow::bail!("unexpected response: {response:?}"),
             }
         }
+        CliCommand::Handlers => {
+            let config = CoreConfig::load(&config_path)?;
+            let client = CoreIpcClient::new(
+                config.ipc.pipe_name,
+                Duration::from_millis(config.ipc.io_timeout_ms),
+            )?;
+            match client.request(CoreRequest::ListHandlers).await? {
+                CoreResponse::Handlers { handlers } => {
+                    for handler in handlers {
+                        println!(
+                            "{} required={:?} optional={:?}",
+                            handler.name, handler.required_parameters, handler.optional_parameters
+                        );
+                    }
+                }
+                response => anyhow::bail!("unexpected response: {response:?}"),
+            }
+        }
         CliCommand::Soak { seconds } => {
             let config = CoreConfig::load(&config_path)?;
             let metrics = CoreMetrics::default();
@@ -168,11 +187,13 @@ async fn main() -> anyhow::Result<()> {
             let registry =
                 CommandRegistry::new(config.commands.clone(), config.matching.normalize_yo);
             let executor: Arc<dyn CommandExecutor> = Arc::new(builtin_handlers(&config.commands)?);
-            let mut runtime = Runtime::new(
+            let mut runtime = Runtime::new_with_wake_words(
                 Arc::new(MockRecognizer { text }),
                 registry,
                 executor,
-                config.wake_word.keyword.clone(),
+                std::iter::once(config.wake_word.keyword.clone())
+                    .chain(config.wake_word.aliases.iter().cloned())
+                    .collect(),
                 config.policy.clone(),
                 Duration::from_millis(config.inference.timeout_ms),
                 Duration::from_millis(config.wake_word.cooldown_ms),

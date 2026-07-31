@@ -10,9 +10,10 @@ use std::{
 
 use assistant_core::{
     AppPaths, AssistantEvent, AssistantState, CORE_API_VERSION, CORE_VERSION, CommandExecutor,
-    CommandRegistry, CoreConfig, CoreError, CoreMetrics, HealthSnapshot, ModelStatus,
-    PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle, RuntimeUpdate, SpeechRecognizer,
-    TranscriptUnavailableReason, TranscriptionRequest, UnavailableRecognizer,
+    CommandRegistry, ComponentHealth, ComponentStatus, CoreConfig, CoreError, CoreMetrics,
+    HealthSnapshot, ModelStatus, PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle,
+    RuntimeUpdate, SpeechRecognizer, TranscriptUnavailableReason, TranscriptionRequest,
+    UnavailableRecognizer,
     audio::{
         AudioDeviceInfo, AudioInput, default_input_device, list_input_devices, resample_linear,
     },
@@ -70,6 +71,7 @@ struct DaemonContext {
     audio_settings: Arc<RwLock<AudioSettings>>,
     audio_generation: Arc<AtomicU64>,
     audio_ready: Arc<AtomicBool>,
+    audio_faulted: Arc<AtomicBool>,
     active_audio_device: Arc<Mutex<ActiveAudioDevice>>,
     manual_capture: Arc<AtomicU8>,
     listening: Arc<AtomicBool>,
@@ -80,7 +82,9 @@ struct DaemonContext {
 }
 
 enum PipelineMessage {
-    WakeWord,
+    WakeWord(u32),
+    StreamBegin(u32),
+    StreamChunk(Vec<f32>),
     Command(TranscriptionRequest),
     CaptureCancelled,
     CaptureUnavailable(TranscriptUnavailableReason),
@@ -150,11 +154,11 @@ async fn main() -> anyhow::Result<()> {
     let metrics = CoreMetrics::default();
     validate_stock_config(&config)?;
     let components = build_runtime_components_without_stt(&config)?;
-    let runtime = Runtime::new(
+    let runtime = Runtime::new_with_wake_words(
         components.recognizer,
         components.commands,
         components.executor,
-        components.wake_word,
+        components.wake_words,
         components.policy,
         components.stt_timeout,
         components.cooldown,
@@ -170,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
     let listening = Arc::new(AtomicBool::new(false));
     let stopping = Arc::new(AtomicBool::new(false));
     let audio_ready = Arc::new(AtomicBool::new(false));
+    let audio_faulted = Arc::new(AtomicBool::new(false));
     let audio_settings = Arc::new(RwLock::new(AudioSettings {
         config: Arc::clone(&config),
         model: None,
@@ -191,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
         audio_settings: Arc::clone(&audio_settings),
         audio_generation: Arc::clone(&audio_generation),
         audio_ready: Arc::clone(&audio_ready),
+        audio_faulted: Arc::clone(&audio_faulted),
         active_audio_device: Arc::new(Mutex::new(ActiveAudioDevice::default())),
         manual_capture: Arc::clone(&manual_capture),
         listening: Arc::clone(&listening),
@@ -206,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         let listening = Arc::clone(&listening);
         let stopping = Arc::clone(&stopping);
         let ready = Arc::clone(&audio_ready);
+        let faulted = Arc::clone(&audio_faulted);
         let manual_capture = Arc::clone(&manual_capture);
         let metrics = metrics.clone();
         tokio::task::spawn_blocking(move || {
@@ -216,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
                 listening,
                 stopping,
                 ready,
+                faulted,
                 manual_capture,
                 metrics,
             )
@@ -225,9 +233,33 @@ async fn main() -> anyhow::Result<()> {
     let bridge = tokio::spawn(async move {
         while let Some(message) = pipeline_rx.recv().await {
             match message {
-                PipelineMessage::WakeWord => {
+                PipelineMessage::WakeWord(sample_rate) => {
                     if let Err(error) = bridge_context.runtime.begin_capture().await {
                         tracing::debug!(%error, "wake word ignored while runtime is busy");
+                    } else if let Err(error) = bridge_context
+                        .runtime
+                        .begin_transcription_stream(sample_rate)
+                        .await
+                    {
+                        tracing::warn!(%error, "incremental STT start failed");
+                    }
+                }
+                PipelineMessage::StreamBegin(sample_rate) => {
+                    if let Err(error) = bridge_context
+                        .runtime
+                        .begin_transcription_stream(sample_rate)
+                        .await
+                    {
+                        tracing::warn!(%error, "incremental STT start failed");
+                    }
+                }
+                PipelineMessage::StreamChunk(samples) => {
+                    if let Err(error) = bridge_context
+                        .runtime
+                        .push_transcription_stream(samples)
+                        .await
+                    {
+                        tracing::warn!(%error, "incremental STT chunk failed");
                     }
                 }
                 PipelineMessage::Command(request) => {
@@ -380,6 +412,15 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
         }
         CoreRequest::GetMetrics => CoreResponse::Metrics {
             metrics: context.metrics.snapshot(),
+        },
+        CoreRequest::ListHandlers => match current_config(&context)
+            .map_err(|error| CoreError::Command(error.to_string()))
+            .and_then(|config| builtin_handlers(&config.commands))
+        {
+            Ok(handlers) => CoreResponse::Handlers {
+                handlers: handlers.schemas(),
+            },
+            Err(error) => core_error(error),
         },
         CoreRequest::GetModelStatus => CoreResponse::ModelStatus {
             status: current_model_status(&context),
@@ -758,15 +799,19 @@ async fn load_stt_recognizer(
     let metrics = context.metrics.clone();
     let threads = config.inference.threads;
     let queue_capacity = config.inference.queue_capacity;
+    let max_restarts = config.inference.max_restarts;
+    let restart_backoff = Duration::from_millis(config.inference.restart_backoff_ms);
     let worker = std::thread::Builder::new()
         .name("assistant-stt-loader".into())
         .spawn(move || {
             let progress_context = worker_context.clone();
-            let result = SherpaOnnxRecognizer::new_with_control(
+            let result = SherpaOnnxRecognizer::new_supervised_with_control(
                 path,
                 threads,
                 queue_capacity,
                 metrics,
+                max_restarts,
+                restart_backoff,
                 cancelled,
                 move |progress, stage| {
                     set_stt_load_progress(&progress_context, progress, stage, active);
@@ -868,7 +913,9 @@ fn build_runtime_components_without_stt(
         }),
         commands: CommandRegistry::new(config.commands.clone(), config.matching.normalize_yo),
         executor,
-        wake_word: config.wake_word.keyword.clone(),
+        wake_words: std::iter::once(config.wake_word.keyword.clone())
+            .chain(config.wake_word.aliases.iter().cloned())
+            .collect(),
         policy: config.policy.clone(),
         stt_timeout: Duration::from_millis(config.inference.timeout_ms),
         cooldown: Duration::from_millis(config.wake_word.cooldown_ms),
@@ -892,8 +939,13 @@ fn build_runtime_update(
     Ok(RuntimeUpdate {
         recognizer,
         commands,
-        wake_word: (old.wake_word.keyword != new.wake_word.keyword)
-            .then(|| new.wake_word.keyword.clone()),
+        wake_words: (old.wake_word.keyword != new.wake_word.keyword
+            || old.wake_word.aliases != new.wake_word.aliases)
+            .then(|| {
+                std::iter::once(new.wake_word.keyword.clone())
+                    .chain(new.wake_word.aliases.iter().cloned())
+                    .collect()
+            }),
         policy: (old.policy != new.policy).then(|| new.policy.clone()),
         stt_timeout: (old.inference.timeout_ms != new.inference.timeout_ms)
             .then(|| Duration::from_millis(new.inference.timeout_ms)),
@@ -905,6 +957,8 @@ fn build_runtime_update(
 fn inference_worker_changed(old: &CoreConfig, new: &CoreConfig) -> bool {
     old.inference.threads != new.inference.threads
         || old.inference.queue_capacity != new.inference.queue_capacity
+        || old.inference.max_restarts != new.inference.max_restarts
+        || old.inference.restart_backoff_ms != new.inference.restart_backoff_ms
 }
 
 fn validate_stock_config(config: &CoreConfig) -> Result<(), assistant_core::config::ConfigError> {
@@ -914,27 +968,90 @@ fn validate_stock_config(config: &CoreConfig) -> Result<(), assistant_core::conf
 }
 
 fn health(context: &DaemonContext) -> HealthSnapshot {
+    let metrics = context.metrics.snapshot();
+    let last_error = context
+        .last_error
+        .lock()
+        .ok()
+        .and_then(|error| error.clone());
+    let model_status = current_model_status(context);
+    let audio_ready = context.audio_ready.load(Ordering::Acquire);
+    let stt_status = if metrics.stt_faults > 0 {
+        ComponentStatus::Faulted
+    } else if matches!(model_status, ModelStatus::Ready { .. }) {
+        ComponentStatus::Ready
+    } else {
+        ComponentStatus::Recovering
+    };
     HealthSnapshot {
         state: context.runtime.state(),
         core_version: CORE_VERSION.into(),
-        audio_ready: context.audio_ready.load(Ordering::Acquire),
+        audio_ready,
         active_audio_device: context
             .active_audio_device
             .lock()
             .ok()
             .and_then(|state| state.device.clone()),
         model_ready: matches!(
-            current_model_status(context),
+            model_status,
             ModelStatus::Ready { .. } | ModelStatus::Loading { active: true, .. }
         ),
         config_version: CURRENT_CONFIG_VERSION,
         core_api_version: CORE_API_VERSION,
         protocol_version: PROTOCOL_VERSION,
-        last_error: context
-            .last_error
-            .lock()
-            .ok()
-            .and_then(|error| error.clone()),
+        last_error: last_error.clone(),
+        components: vec![
+            ComponentHealth {
+                name: "audio".into(),
+                status: if context.audio_faulted.load(Ordering::Acquire) {
+                    ComponentStatus::Faulted
+                } else if audio_ready {
+                    ComponentStatus::Ready
+                } else {
+                    ComponentStatus::Recovering
+                },
+                restart_count: metrics.audio_reconnects.min(u64::from(u32::MAX)) as u32,
+                last_error: last_error.clone(),
+            },
+            ComponentHealth {
+                name: "stt".into(),
+                status: stt_status,
+                restart_count: metrics.stt_restarts.min(u64::from(u32::MAX)) as u32,
+                last_error: (metrics.stt_faults > 0).then(|| "STT restart budget exhausted".into()),
+            },
+            ComponentHealth {
+                name: "runtime".into(),
+                status: if context.runtime.state() == AssistantState::Faulted {
+                    ComponentStatus::Faulted
+                } else {
+                    ComponentStatus::Ready
+                },
+                restart_count: 0,
+                last_error: None,
+            },
+            ComponentHealth {
+                name: "model".into(),
+                status: match &model_status {
+                    ModelStatus::Ready { .. } => ComponentStatus::Ready,
+                    ModelStatus::Failed { .. } => ComponentStatus::Faulted,
+                    ModelStatus::Missing | ModelStatus::Cancelled => ComponentStatus::Stopped,
+                    ModelStatus::Installing { .. } | ModelStatus::Loading { .. } => {
+                        ComponentStatus::Recovering
+                    }
+                },
+                restart_count: 0,
+                last_error: match &model_status {
+                    ModelStatus::Failed { message } => Some(message.clone()),
+                    _ => None,
+                },
+            },
+            ComponentHealth {
+                name: "ipc".into(),
+                status: ComponentStatus::Ready,
+                restart_count: 0,
+                last_error: None,
+            },
+        ],
     }
 }
 
@@ -1067,9 +1184,12 @@ fn audio_loop(
     listening: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
+    faulted: Arc<AtomicBool>,
     manual_capture: Arc<AtomicU8>,
     metrics: CoreMetrics,
 ) -> Result<(), String> {
+    const MAX_RESTARTS: u32 = 5;
+    let mut failures = 0_u32;
     while !stopping.load(Ordering::Acquire) {
         let current_generation = generation.load(Ordering::Acquire);
         let current = settings
@@ -1081,9 +1201,10 @@ fn audio_loop(
             std::thread::sleep(Duration::from_millis(200));
             continue;
         };
-        let mut detector = match SherpaWakeWordDetector::new(
+        let mut detector = match SherpaWakeWordDetector::new_with_aliases(
             model,
-            &current.config.wake_word.keyword,
+            std::iter::once(current.config.wake_word.keyword.as_str())
+                .chain(current.config.wake_word.aliases.iter().map(String::as_str)),
             current.config.wake_word.score,
             current.config.wake_word.threshold,
             1,
@@ -1098,6 +1219,7 @@ fn audio_loop(
                 continue;
             }
         };
+        let session_started = Instant::now();
         match audio_session(
             &current.config,
             &mut detector,
@@ -1111,7 +1233,11 @@ fn audio_loop(
             current_generation,
         ) {
             Ok(SessionEnd::Stopped) => return Ok(()),
-            Ok(SessionEnd::Reconfigured | SessionEnd::InputChanged) => continue,
+            Ok(SessionEnd::Reconfigured | SessionEnd::InputChanged) => {
+                failures = 0;
+                faulted.store(false, Ordering::Release);
+                continue;
+            }
             Err(error) => {
                 ready.store(false, Ordering::Release);
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
@@ -1121,9 +1247,32 @@ fn audio_loop(
                 let _ = commands.blocking_send(PipelineMessage::AudioDeviceChanged(None));
                 let _ = commands.blocking_send(PipelineMessage::AudioError(error));
                 metrics.audio_reconnected();
-                std::thread::sleep(Duration::from_millis(
-                    current.config.audio.reconnect_delay_ms,
-                ));
+                failures = if session_started.elapsed() >= Duration::from_secs(30) {
+                    1
+                } else {
+                    failures.saturating_add(1)
+                };
+                if failures > MAX_RESTARTS {
+                    faulted.store(true, Ordering::Release);
+                    let _ = commands.blocking_send(PipelineMessage::AudioError(
+                        "audio restart budget exhausted; circuit breaker open for 60 seconds"
+                            .into(),
+                    ));
+                    let retry_at = Instant::now() + Duration::from_secs(60);
+                    while generation.load(Ordering::Acquire) == current_generation
+                        && !stopping.load(Ordering::Acquire)
+                        && Instant::now() < retry_at
+                    {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    failures = 0;
+                    faulted.store(false, Ordering::Release);
+                    continue;
+                }
+                let shift = failures.saturating_sub(1).min(10);
+                let delay = Duration::from_millis(current.config.audio.reconnect_delay_ms)
+                    .saturating_mul(1_u32 << shift);
+                std::thread::sleep(delay.min(Duration::from_secs(60)));
                 detector.reset();
             }
         }
@@ -1278,6 +1427,9 @@ fn audio_session(
                 {
                     pipeline.start_manual();
                     detector.reset();
+                    commands
+                        .blocking_send(PipelineMessage::StreamBegin(target_rate))
+                        .map_err(|_| "runtime command queue closed".to_string())?;
                 }
             } else if manual_state == MANUAL_CAPTURE_FINISH {
                 if !pipeline.is_collecting() {
@@ -1313,7 +1465,7 @@ fn audio_session(
                 metrics.observe_kws(started.elapsed().as_micros() as u64);
                 if detected {
                     commands
-                        .blocking_send(PipelineMessage::WakeWord)
+                        .blocking_send(PipelineMessage::WakeWord(target_rate))
                         .map_err(|_| "runtime command queue closed".to_string())?;
                 }
                 detected
@@ -1337,7 +1489,14 @@ fn audio_session(
                 ));
             }
             let was_manual = manual_capture.load(Ordering::Acquire) != MANUAL_CAPTURE_IDLE;
-            if let Some(samples) = pipeline.push(&frame, detected) {
+            let was_collecting = pipeline.is_collecting();
+            let completed = pipeline.push(&frame, detected);
+            if detected || was_collecting {
+                commands
+                    .blocking_send(PipelineMessage::StreamChunk(frame))
+                    .map_err(|_| "runtime command queue closed".to_string())?;
+            }
+            if let Some(samples) = completed {
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 let message = if was_manual && rms(&samples) < config.audio.vad_threshold {
                     PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)

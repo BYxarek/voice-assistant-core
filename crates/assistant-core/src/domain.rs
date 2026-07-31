@@ -7,7 +7,34 @@ use thiserror::Error;
 use crate::audio::AudioDeviceInfo;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Readiness state of one supervised daemon component.
+pub enum ComponentStatus {
+    /// Component is accepting work.
+    Ready,
+    /// Component is initializing or restarting with bounded backoff.
+    Recovering,
+    /// Restart budget was exhausted or external action is required.
+    Faulted,
+    /// Component is intentionally inactive.
+    Stopped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Component-level health exposed through IPC.
+pub struct ComponentHealth {
+    /// Stable component name.
+    pub name: String,
+    /// Current supervised status.
+    pub status: ComponentStatus,
+    /// Automatic restarts since daemon startup.
+    pub restart_count: u32,
+    /// Most recent component-specific failure.
+    pub last_error: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Readiness and compatibility information returned to applications.
@@ -31,6 +58,9 @@ pub struct HealthSnapshot {
     pub protocol_version: u16,
     /// Last recoverable component error, when present.
     pub last_error: Option<String>,
+    /// Per-component supervised readiness and restart state.
+    #[serde(default)]
+    pub components: Vec<ComponentHealth>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -387,6 +417,26 @@ impl CoreError {
 pub trait SpeechRecognizer: Send + Sync {
     /// Transcribes owned mono samples without blocking the audio callback.
     async fn transcribe(&self, request: TranscriptionRequest) -> Result<Transcript, CoreError>;
+
+    /// Starts an optional incremental recognition session.
+    async fn begin_stream(&self, _sample_rate: u32) -> Result<bool, CoreError> {
+        Ok(false)
+    }
+
+    /// Adds one owned mono chunk to an active incremental session.
+    async fn push_stream(&self, _samples: Vec<f32>) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    /// Finishes an incremental session, falling back to the complete request by default.
+    async fn finish_stream(&self, request: TranscriptionRequest) -> Result<Transcript, CoreError> {
+        self.transcribe(request).await
+    }
+
+    /// Replaces a failed native worker when the adapter supports supervised recovery.
+    async fn recover(&self) -> Result<bool, CoreError> {
+        Ok(false)
+    }
 }
 
 #[async_trait]

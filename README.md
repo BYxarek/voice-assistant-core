@@ -9,8 +9,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.1.1**. Публичный Rust extension API v2 и IPC
-protocol v3. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.2.0**. Публичный Rust extension API v3 и IPC
+protocol v4. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -29,7 +29,9 @@ inference изолированы от GUI.
 ## Возможности
 
 - bounded audio pipeline: CPAL → mono → 16 кГц → KWS → VAD → STT;
-- отдельная задача runtime и отдельный persistent STT worker;
+- отдельная задача runtime и supervised persistent STT worker с warm-up, timeout watchdog,
+  bounded restart budget и exponential backoff;
+- потоковый STT начинается сразу после wake word и декодирует аудио параллельно захвату;
 - IPC доступен в состоянии `Starting`, пока cancellable blocking worker загружает STT и публикует прогресс;
 - восстановление микрофона после ошибки или зависания callback и автоматическое
   переключение при смене default input;
@@ -40,7 +42,9 @@ inference изолированы от GUI.
 - pinned model revision, SHA-256 manifest и атомарная активация;
 - дифференциальное применение конфигурации без перезагрузки незатронутых компонентов;
 - локальный versioned Named Pipe IPC и готовый Rust-клиент;
+- несколько wake-word aliases и IPC-discovery схем зарегистрированных command handlers;
 - health, состояние модели, события, очереди, задержки, CPU time и RAM через IPC;
+- component health для audio, STT, runtime, model и IPC, включая restart count и fault state;
 - CLI для диагностики, проверки WAV и soak-теста.
 
 ## Требования
@@ -95,7 +99,7 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Публичный Rust API v2
+## Публичный Rust API v3
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
 `CORE_API_VERSION` равен `2`. В v2 входят:
@@ -109,7 +113,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v3; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v4; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -152,7 +156,7 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v3
+## IPC protocol v4
 
 Pipe по умолчанию: `\\.\pipe\voice-assistant-core`. Сервер допускает только
 локальных клиентов, защищён DACL и разрешает один daemon на pipe. Каждый JSON
@@ -161,7 +165,7 @@ envelope имеет `protocol_version`, `request_id`, `payload` и little-endian
 
 Запросы:
 
-- `get_status`, `get_health`, `get_config`, `get_metrics`;
+- `get_status`, `get_health`, `get_config`, `get_metrics`, `list_handlers`;
 - `validate_config`, `apply_config`, `list_audio_devices`;
 - `get_model_status`, `install_model`, `cancel_model_install`, `verify_model`;
 - `suspend`, `resume`, `begin_capture`, `end_capture`, `submit_text`;
@@ -176,6 +180,10 @@ prefix и применяет те же risk, confirmation и timeout rules.
 `CoreIpcClient` проверяет версию, ограничивает размер сообщения и повторяет
 кратковременное подключение. `subscribe_events` создаёт отдельный
 `EventSubscription`. Ошибки имеют стабильный `IpcErrorCode`.
+
+`list_handlers` возвращает отсортированные `HandlerSchema` с обязательными и
+необязательными параметрами. `HealthSnapshot.components` сообщает состояние
+`ready/recovering/faulted/stopped` и число автоматических перезапусков.
 
 Поток событий публикует `audio_level { rms }` не чаще 10 раз в секунду и
 `transcript_unavailable { reason }`. Причины: `wake_word_not_detected`,
@@ -194,6 +202,17 @@ prefix и применяет те же risk, confirmation и timeout rules.
 и проверки runtime меняет только затронутые компоненты: команды, подтверждения
 и микрофон не пересоздают STT; новый STT worker нужен только при изменении его
 threads/queue. Файл заменяется атомарно, параметры pipe требуют перезапуска daemon.
+
+```toml
+[wake_word]
+keyword = "ассистент"
+aliases = ["помощник"]
+
+[inference]
+threads = 0 # автоматически по available_parallelism
+max_restarts = 3
+restart_backoff_ms = 500
+```
 
 ## Команды и безопасность
 
@@ -240,6 +259,7 @@ models\stt-ru-streaming\<revision>\
 └── lang\
 ```
 
+Перед загрузкой проверяются запись/rename в каталоге и минимум 256 МиБ свободного места.
 Скачиваются только allowlisted-файлы. Установка идёт во временный каталог,
 проверяется и активируется rename. Повреждённая активная ревизия временно
 изолируется и восстанавливается, если новая установка не завершилась.
@@ -252,6 +272,7 @@ cargo run -p assistant-cli -- transcribe command.wav
 cargo run -p assistant-cli -- test-wake-word command.wav
 cargo run -p assistant-cli -- evaluate command.wav
 cargo run -p assistant-cli -- soak --seconds 3600
+cargo run -p assistant-cli -- handlers
 ```
 
 `evaluate` печатает KWS и полный transcript. `soak` следит за зависанием

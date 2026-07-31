@@ -37,12 +37,13 @@ pub struct Runtime {
     events: broadcast::Sender<AssistantEvent>,
     state_changes: watch::Sender<AssistantState>,
     metrics: CoreMetrics,
-    wake_word: String,
+    wake_words: Vec<String>,
     policy: PolicyConfig,
     stt_timeout: Duration,
     cooldown: Duration,
     pending: Option<PendingCommand>,
     confirmation_sequence: u64,
+    streaming_stt: bool,
 }
 
 impl Runtime {
@@ -61,6 +62,30 @@ impl Runtime {
         cooldown: Duration,
         metrics: CoreMetrics,
     ) -> Self {
+        Self::new_with_wake_words(
+            recognizer,
+            registry,
+            executor,
+            vec![wake_word],
+            policy,
+            stt_timeout,
+            cooldown,
+            metrics,
+        )
+    }
+
+    /// Creates a runtime accepting the canonical wake word and all configured aliases.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_wake_words(
+        recognizer: Arc<dyn SpeechRecognizer>,
+        registry: CommandRegistry,
+        executor: Arc<dyn CommandExecutor>,
+        wake_words: Vec<String>,
+        policy: PolicyConfig,
+        stt_timeout: Duration,
+        cooldown: Duration,
+        metrics: CoreMetrics,
+    ) -> Self {
         let (events, _) = broadcast::channel(128);
         let (state_changes, _) = watch::channel(AssistantState::Starting);
         Self {
@@ -71,12 +96,13 @@ impl Runtime {
             events,
             state_changes,
             metrics,
-            wake_word,
+            wake_words,
             policy,
             stt_timeout,
             cooldown,
             pending: None,
             confirmation_sequence: 0,
+            streaming_stt: false,
         }
     }
 
@@ -193,7 +219,45 @@ impl Runtime {
 
     /// Returns an empty or too-short manual capture to idle listening.
     pub fn cancel_capture(&mut self) -> Result<(), CoreError> {
+        self.streaming_stt = false;
         self.transition(AssistantState::IdleListening)
+    }
+
+    /// Starts incremental STT as soon as command capture begins.
+    pub async fn begin_transcription_stream(&mut self, sample_rate: u32) -> Result<(), CoreError> {
+        self.streaming_stt =
+            match tokio::time::timeout(self.stt_timeout, self.recognizer.begin_stream(sample_rate))
+                .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    let _ = self.recognizer.recover().await;
+                    return Err(CoreError::Recognition(
+                        "STT stream startup timed out".into(),
+                    ));
+                }
+            };
+        Ok(())
+    }
+
+    /// Forwards one command-audio frame to an active incremental STT session.
+    pub async fn push_transcription_stream(&mut self, samples: Vec<f32>) -> Result<(), CoreError> {
+        if self.streaming_stt {
+            match tokio::time::timeout(self.stt_timeout, self.recognizer.push_stream(samples)).await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    self.streaming_stt = false;
+                    return Err(error);
+                }
+                Err(_) => {
+                    self.streaming_stt = false;
+                    let _ = self.recognizer.recover().await;
+                    return Err(CoreError::Recognition("STT stream timed out".into()));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Matches application-supplied text through the normal command policy.
@@ -215,8 +279,12 @@ impl Runtime {
         self.transition(AssistantState::Transcribing)?;
 
         let started = Instant::now();
-        let outcome =
-            tokio::time::timeout(self.stt_timeout, self.recognizer.transcribe(request)).await;
+        let outcome = if self.streaming_stt {
+            self.streaming_stt = false;
+            tokio::time::timeout(self.stt_timeout, self.recognizer.finish_stream(request)).await
+        } else {
+            tokio::time::timeout(self.stt_timeout, self.recognizer.transcribe(request)).await
+        };
         self.metrics
             .observe_stt(started.elapsed().as_millis() as u64);
         let transcript = match outcome {
@@ -229,7 +297,15 @@ impl Runtime {
                 }
                 return self.fail("stt", error);
             }
-            Err(_) => return self.fail("stt", CoreError::Recognition("STT timed out".into())),
+            Err(_) => {
+                let recovery = self.recognizer.recover().await;
+                let message = match recovery {
+                    Ok(true) => "STT timed out; worker restarted",
+                    Ok(false) => "STT timed out",
+                    Err(_) => "STT timed out; worker restart budget exhausted",
+                };
+                return self.fail("stt", CoreError::Recognition(message.into()));
+            }
         };
         if transcript.text.trim().is_empty() {
             let _ = self.events.send(AssistantEvent::TranscriptUnavailable {
@@ -249,7 +325,8 @@ impl Runtime {
 
     async fn match_text(&mut self, text: String, allow_wake_word: bool) -> Result<(), CoreError> {
         let command = if allow_wake_word {
-            self.registry.find_after_wake_word(&text, &self.wake_word)
+            self.registry
+                .find_after_wake_words(&text, self.wake_words.iter().map(String::as_str))
         } else {
             self.registry.find(&text)
         };
@@ -393,7 +470,7 @@ impl Runtime {
         recognizer: Arc<dyn SpeechRecognizer>,
         registry: CommandRegistry,
         executor: Arc<dyn CommandExecutor>,
-        wake_word: String,
+        wake_words: Vec<String>,
         policy: PolicyConfig,
         stt_timeout: Duration,
         cooldown: Duration,
@@ -401,7 +478,7 @@ impl Runtime {
         self.reconfigure_partial(RuntimeUpdate {
             recognizer: Some(recognizer),
             commands: Some((registry, executor)),
-            wake_word: Some(wake_word),
+            wake_words: Some(wake_words),
             policy: Some(policy),
             stt_timeout: Some(stt_timeout),
             cooldown: Some(cooldown),
@@ -427,8 +504,8 @@ impl Runtime {
             self.registry = registry;
             self.executor = executor;
         }
-        if let Some(wake_word) = update.wake_word {
-            self.wake_word = wake_word;
+        if let Some(wake_words) = update.wake_words {
+            self.wake_words = wake_words;
         }
         if let Some(policy) = update.policy {
             self.policy = policy;
@@ -550,6 +627,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(Transcript {
                 text: "late".into(),
+                confidence: None,
+            })
+        }
+    }
+
+    struct StreamingRecognizer(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl SpeechRecognizer for StreamingRecognizer {
+        async fn transcribe(&self, _: TranscriptionRequest) -> Result<Transcript, CoreError> {
+            panic!("batch fallback must not run for a healthy stream")
+        }
+
+        async fn begin_stream(&self, _: u32) -> Result<bool, CoreError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        }
+
+        async fn push_stream(&self, _: Vec<f32>) -> Result<(), CoreError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn finish_stream(&self, _: TranscriptionRequest) -> Result<Transcript, CoreError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Transcript {
+                text: "открой блокнот".into(),
                 confidence: None,
             })
         }
@@ -746,6 +850,30 @@ mod tests {
         runtime.start().unwrap();
         assert!(runtime.process_command_audio(request()).await.is_err());
         assert_eq!(runtime.state(), AssistantState::IdleListening);
+    }
+
+    #[tokio::test]
+    async fn streaming_stt_starts_during_capture_and_finishes_without_batch_fallback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new(
+            Arc::new(StreamingRecognizer(Arc::clone(&calls))),
+            CommandRegistry::new(vec![command(RiskLevel::Low)], true),
+            Arc::new(CountingExecutor(Arc::new(AtomicUsize::new(0)))),
+            "ассистент".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        runtime.start_command_capture().unwrap();
+        runtime.begin_transcription_stream(16_000).await.unwrap();
+        runtime
+            .push_transcription_stream(vec![0.1; 320])
+            .await
+            .unwrap();
+        runtime.process_captured_audio(request()).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]

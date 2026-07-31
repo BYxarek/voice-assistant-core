@@ -118,6 +118,7 @@ impl ModelManager {
         let model_root = self.root.join("stt-ru-streaming");
         let destination = model_root.join(ALPHACEP_STREAMING_RU_REVISION);
         fs::create_dir_all(&model_root)?;
+        preflight_install(&model_root)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ModelError::Manifest(e.to_string()))?
@@ -251,6 +252,54 @@ impl ModelManager {
         }
         Ok(manifest)
     }
+}
+
+const MODEL_INSTALL_MIN_FREE_BYTES: u64 = 256 * 1024 * 1024;
+
+fn preflight_install(directory: &Path) -> Result<(), ModelError> {
+    let probe = directory.join(format!(".preflight-{}", std::process::id()));
+    let renamed = directory.join(format!(".preflight-{}-renamed", std::process::id()));
+    fs::write(&probe, b"voice-assistant-core")?;
+    let result = fs::rename(&probe, &renamed).and_then(|()| fs::remove_file(&renamed));
+    if result.is_err() {
+        let _ = fs::remove_file(&probe);
+        let _ = fs::remove_file(&renamed);
+    }
+    result?;
+    if available_space(directory)? < MODEL_INSTALL_MIN_FREE_BYTES {
+        return Err(ModelError::Verification(format!(
+            "model installation requires at least {} MiB free",
+            MODEL_INSTALL_MIN_FREE_BYTES / 1024 / 1024
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn available_space(directory: &Path) -> Result<u64, ModelError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = directory.as_os_str().encode_wide().chain([0]).collect();
+    let mut available = 0_u64;
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path and `available` is writable.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(ModelError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(available)
+}
+
+#[cfg(not(windows))]
+fn available_space(_directory: &Path) -> Result<u64, ModelError> {
+    Ok(u64::MAX)
 }
 
 fn copy_model_files(

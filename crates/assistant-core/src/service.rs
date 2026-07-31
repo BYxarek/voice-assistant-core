@@ -24,7 +24,7 @@ pub struct RuntimeComponents {
     /// Typed handler registry or compatible executor.
     pub executor: Arc<dyn CommandExecutor>,
     /// Prefix removed before exact command matching.
-    pub wake_word: String,
+    pub wake_words: Vec<String>,
     /// Confirmation behavior.
     pub policy: PolicyConfig,
     /// Maximum duration of one recognizer request.
@@ -41,7 +41,7 @@ pub struct RuntimeUpdate {
     /// Replacement command matcher and typed executor.
     pub commands: Option<(CommandRegistry, Arc<dyn CommandExecutor>)>,
     /// Replacement prefix removed before exact command matching.
-    pub wake_word: Option<String>,
+    pub wake_words: Option<Vec<String>>,
     /// Replacement confirmation behavior.
     pub policy: Option<PolicyConfig>,
     /// Replacement maximum duration of one recognizer request.
@@ -55,6 +55,8 @@ enum Control {
     BeginCapture(oneshot::Sender<Result<(), CoreError>>),
     BeginManualCapture(oneshot::Sender<Result<(), CoreError>>),
     CancelCapture(oneshot::Sender<Result<(), CoreError>>),
+    BeginStream(u32, oneshot::Sender<Result<(), CoreError>>),
+    PushStream(Vec<f32>, oneshot::Sender<Result<(), CoreError>>),
     Captured(TranscriptionRequest, oneshot::Sender<Result<(), CoreError>>),
     SubmitText(String, oneshot::Sender<Result<(), CoreError>>),
     Suspend(oneshot::Sender<Result<(), CoreError>>),
@@ -122,6 +124,26 @@ impl RuntimeHandle {
         self.call(Control::CancelCapture).await
     }
 
+    /// Starts optional incremental STT for an active capture.
+    pub async fn begin_transcription_stream(&self, sample_rate: u32) -> Result<(), CoreError> {
+        let (response, receiver) = oneshot::channel();
+        self.controls
+            .send(Control::BeginStream(sample_rate, response))
+            .await
+            .map_err(|_| stopped())?;
+        receiver.await.map_err(|_| stopped())?
+    }
+
+    /// Queues one incremental command-audio chunk.
+    pub async fn push_transcription_stream(&self, samples: Vec<f32>) -> Result<(), CoreError> {
+        let (response, receiver) = oneshot::channel();
+        self.controls
+            .send(Control::PushStream(samples, response))
+            .await
+            .map_err(|_| stopped())?;
+        receiver.await.map_err(|_| stopped())?
+    }
+
     /// Queues completed command audio for STT and matching.
     pub async fn captured_audio(&self, request: TranscriptionRequest) -> Result<(), CoreError> {
         let (response, receiver) = oneshot::channel();
@@ -177,7 +199,7 @@ impl RuntimeHandle {
         self.reconfigure_partial(RuntimeUpdate {
             recognizer: Some(components.recognizer),
             commands: Some((components.commands, components.executor)),
-            wake_word: Some(components.wake_word),
+            wake_words: Some(components.wake_words),
             policy: Some(components.policy),
             stt_timeout: Some(components.stt_timeout),
             cooldown: Some(components.cooldown),
@@ -313,6 +335,12 @@ pub fn spawn_runtime_service(
                         Control::CancelCapture(response) => {
                             let _ = response.send(runtime.cancel_capture());
                         }
+                        Control::BeginStream(sample_rate, response) => {
+                            let _ = response.send(runtime.begin_transcription_stream(sample_rate).await);
+                        }
+                        Control::PushStream(samples, response) => {
+                            let _ = response.send(runtime.push_transcription_stream(samples).await);
+                        }
                         Control::Captured(request, response) => {
                             let _ = response.send(runtime.process_captured_audio(request).await);
                         }
@@ -385,13 +413,13 @@ mod tests {
 
     #[tokio::test]
     async fn state_reads_do_not_queue_behind_the_runtime() {
-        let mut runtime = Runtime::new(
+        let mut runtime = Runtime::new_with_wake_words(
             Arc::new(MockRecognizer {
                 text: String::new(),
             }),
             CommandRegistry::new(Vec::new(), true),
             Arc::new(Noop),
-            "assistant".into(),
+            vec!["assistant".into()],
             PolicyConfig::default(),
             Duration::from_secs(1),
             Duration::from_millis(10),

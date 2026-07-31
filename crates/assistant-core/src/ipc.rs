@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     audio::AudioDeviceInfo,
+    commands::HandlerSchema,
     config::CoreConfig,
     domain::{AssistantEvent, AssistantState, HealthSnapshot, ModelStatus, PROTOCOL_VERSION},
     metrics::MetricsSnapshot,
@@ -57,6 +58,8 @@ pub enum CoreRequest {
     ListAudioDevices,
     /// Reads a point-in-time operational metrics snapshot.
     GetMetrics,
+    /// Lists command-handler capability contracts installed in the daemon.
+    ListHandlers,
     /// Reads durable model lifecycle status.
     GetModelStatus,
     /// Starts pinned model installation if none is active.
@@ -122,6 +125,11 @@ pub enum CoreResponse {
     Metrics {
         /// Point-in-time counters and process usage.
         metrics: MetricsSnapshot,
+    },
+    /// Response to `list_handlers`.
+    Handlers {
+        /// Installed handler schemas sorted by stable name.
+        handlers: Vec<HandlerSchema>,
     },
     /// Response to `get_model_status`.
     ModelStatus {
@@ -201,7 +209,7 @@ mod tests {
         let message = Envelope::new("golden-1", CoreRequest::GetStatus);
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
-            r#"{"protocol_version":3,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+            r#"{"protocol_version":4,"request_id":"golden-1","payload":{"type":"get_status"}}"#
         );
     }
 
@@ -210,7 +218,7 @@ mod tests {
         let begin = Envelope::new("manual-1", CoreRequest::BeginCapture);
         assert_eq!(
             String::from_utf8(encode(&begin).unwrap()).unwrap(),
-            r#"{"protocol_version":3,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
+            r#"{"protocol_version":4,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
         );
         let text = Envelope::new(
             "manual-2",
@@ -220,7 +228,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&text).unwrap()).unwrap(),
-            r#"{"protocol_version":3,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+            r#"{"protocol_version":4,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
         );
     }
 
@@ -234,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&level).unwrap()).unwrap(),
-            r#"{"protocol_version":3,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
+            r#"{"protocol_version":4,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
         );
         let unavailable = Envelope::new(
             "event-2",
@@ -246,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&unavailable).unwrap()).unwrap(),
-            r#"{"protocol_version":3,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
+            r#"{"protocol_version":4,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
         );
     }
 }

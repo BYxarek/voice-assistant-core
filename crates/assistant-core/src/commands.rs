@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::CommandConfig,
@@ -56,13 +57,24 @@ impl CommandRegistry {
 
     /// Matches an exact command, optionally after a known wake-word prefix.
     pub fn find_after_wake_word(&self, text: &str, wake_word: &str) -> Option<&CommandConfig> {
+        self.find_after_wake_words(text, std::iter::once(wake_word))
+    }
+
+    /// Matches an exact command, optionally after any known wake-word prefix.
+    pub fn find_after_wake_words<'a>(
+        &self,
+        text: &str,
+        wake_words: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&CommandConfig> {
         let text = normalize(text, self.normalize_yo);
         self.find_normalized(&text).or_else(|| {
-            let wake_word = normalize(wake_word, self.normalize_yo);
-            text.strip_prefix(&wake_word)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .and_then(|text| self.find_normalized(text))
+            wake_words.into_iter().find_map(|wake_word| {
+                let wake_word = normalize(wake_word, self.normalize_yo);
+                text.strip_prefix(&wake_word)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .and_then(|text| self.find_normalized(text))
+            })
         })
     }
 
@@ -78,7 +90,7 @@ impl CommandRegistry {
 }
 
 /// Stable parameter contract published by a command handler.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HandlerSchema {
     /// Stable handler name used by command configuration.
     pub name: String,
@@ -197,6 +209,17 @@ impl HandlerRegistry {
     /// Returns registered handler names for diagnostics.
     pub fn handler_names(&self) -> impl Iterator<Item = &str> {
         self.handlers.keys().map(String::as_str)
+    }
+
+    /// Returns stable handler contracts sorted by name for diagnostics and GUI discovery.
+    pub fn schemas(&self) -> Vec<HandlerSchema> {
+        let mut schemas: Vec<_> = self
+            .handlers
+            .values()
+            .map(|handler| handler.schema())
+            .collect();
+        schemas.sort_by(|left, right| left.name.cmp(&right.name));
+        schemas
     }
 }
 
@@ -328,6 +351,11 @@ mod tests {
                 .find_after_wake_word("что-нибудь открой блокнот", "ассистент")
                 .is_none()
         );
+        assert!(
+            registry
+                .find_after_wake_words("помощник, открой блокнот", ["ассистент", "помощник"],)
+                .is_some()
+        );
     }
 
     struct EchoHandler;
@@ -358,5 +386,6 @@ mod tests {
             "ok"
         );
         assert!(handlers.execute("echo", &BTreeMap::new()).await.is_err());
+        assert_eq!(handlers.schemas()[0].name, "echo");
     }
 }

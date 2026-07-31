@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 
 [audio]
 # Non-empty backend device ID, or "default" for the system input device.
@@ -20,14 +20,18 @@ normalize_yo = true
 
 [wake_word]
 keyword = "ассистент"
+aliases = ["помощник"]
 score = 1.5
 threshold = 0.35
 cooldown_ms = 1200
 
 [inference]
-threads = 4
+# 0 selects the available host parallelism automatically.
+threads = 0
 queue_capacity = 2
 timeout_ms = 30000
+max_restarts = 3
+restart_backoff_ms = 500
 
 [policy]
 # Set to false to execute every command, including high-risk commands,

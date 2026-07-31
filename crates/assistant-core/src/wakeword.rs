@@ -38,8 +38,36 @@ impl SherpaWakeWordDetector {
         threads: i32,
         sample_rate: u32,
     ) -> Result<Self, WakeWordError> {
+        Self::new_with_aliases(
+            model_directory,
+            std::iter::once(keyword),
+            score,
+            threshold,
+            threads,
+            sample_rate,
+        )
+    }
+
+    /// Loads a verified model directory and encodes all configured aliases.
+    pub fn new_with_aliases<'a>(
+        model_directory: impl Into<PathBuf>,
+        keywords: impl IntoIterator<Item = &'a str>,
+        score: f32,
+        threshold: f32,
+        threads: i32,
+        sample_rate: u32,
+    ) -> Result<Self, WakeWordError> {
         let directory = model_directory.into();
-        let keywords = tokenize_keyword(&directory, keyword, score, threshold)?;
+        let keywords = keywords
+            .into_iter()
+            .map(|keyword| tokenize_keyword(&directory, keyword, score, threshold))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        if keywords.is_empty() {
+            return Err(WakeWordError::Configuration(
+                "no wake words configured".into(),
+            ));
+        }
         let path = |relative: &str| directory.join(relative).to_string_lossy().into_owned();
         let mut config = KeywordSpotterConfig::default();
         config.model_config.transducer.encoder = Some(path("am-onnx/encoder.int8.onnx"));

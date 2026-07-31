@@ -71,6 +71,19 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
     assert_eq!(health.config_version, CURRENT_CONFIG_VERSION);
     assert_eq!(health.core_api_version, CORE_API_VERSION);
     assert_eq!(health.protocol_version, PROTOCOL_VERSION);
+    assert!(
+        health
+            .components
+            .iter()
+            .any(|component| component.name == "stt")
+    );
+
+    match client.request(CoreRequest::ListHandlers).await.unwrap() {
+        CoreResponse::Handlers { handlers } => {
+            assert!(handlers.iter().any(|handler| handler.name == "launch_app"));
+        }
+        response => panic!("unexpected handlers response: {response:?}"),
+    }
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

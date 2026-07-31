@@ -22,7 +22,7 @@
 <a class="skip" href="#main">К содержанию</a><div class="progress" id="progress"></div>
 <div class="layout">
   <aside class="sidebar">
-    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.1.1 · Public API v2</span></span></a>
+    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.2.0 · Public API v3</span></span></a>
     <div class="search-wrap"><label class="sr-only" for="search">Поиск</label><input id="search" class="search" type="search" placeholder="Поиск по API…" autocomplete="off"><span class="search-key">/</span></div>
     <div class="nav-title">Содержание</div><nav class="nav" aria-label="Разделы API"><a href="#section-1" data-nav="section-1"><span>01</span>Версии, Cargo features и платформы</a>
 <a href="#section-2" data-nav="section-2"><span>02</span>Публичные модули</a>
@@ -32,9 +32,9 @@
 <a href="#section-6" data-nav="section-6"><span>06</span>Extension API команд</a>
 <a href="#section-7" data-nav="section-7"><span>07</span>Адаптеры STT, VAD и KWS</a>
 <a href="#section-8" data-nav="section-8"><span>08</span>Audio API</a>
-<a href="#section-9" data-nav="section-9"><span>09</span>Конфигурация schema v2</a>
+<a href="#section-9" data-nav="section-9"><span>09</span>Конфигурация schema v3</a>
 <a href="#section-10" data-nav="section-10"><span>10</span>Model API</a>
-<a href="#section-11" data-nav="section-11"><span>11</span>IPC wire protocol v3</a>
+<a href="#section-11" data-nav="section-11"><span>11</span>IPC wire protocol v4</a>
 <a href="#section-12" data-nav="section-12"><span>12</span>Ошибки</a>
 <a href="#section-13" data-nav="section-13"><span>13</span>Метрики</a>
 <a href="#section-14" data-nav="section-14"><span>14</span>Daemon</a>
@@ -46,7 +46,7 @@
   <main id="main"><div class="content">
     <header class="hero searchable"><div class="eyebrow">Developer reference · 17 разделов</div><h1>Полный справочник API</h1><p>Rust embedding, расширения команд, runtime, IPC, конфигурация, модели, аудио и всё необходимое для создания приложения поверх ядра.</p><div class="badges"><span class="badge"><strong>Core API</strong> v1</span><span class="badge"><strong>IPC</strong> v2</span><span class="badge"><strong>Config</strong> schema 2</span></div></header>
     <div id="empty" class="empty">Ничего не найдено. Попробуйте имя типа, метода или IPC-запроса.</div>
-    <p>Этот документ описывает публичный контракт <code>assistant-core</code> 1.1.1: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
+    <p>Этот документ описывает публичный контракт <code>assistant-core</code> 1.2.0: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
 <section id="section-1" class="doc-section searchable"><div class="section-kicker">Раздел 1</div><h2>Версии, Cargo features и платформы</h2>
 <ul>
 <li><code>CORE_API_VERSION = 2</code> — версия публичного Rust extension/embedding API.</li>
@@ -56,10 +56,10 @@
 <li>default feature <code>model-source-huggingface</code> включает установку модели.</li>
 <li>feature <code>stt-sherpa-onnx</code> включает <code>SherpaOnnxRecognizer</code> и wake-word API.</li>
 </ul>
-<p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>. Добавление необязательного поля Serde или нового запроса, который старый клиент не отправляет, допускается внутри protocol v3.</p>
+<p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>. Добавление необязательного поля Serde или нового запроса, который старый клиент не отправляет, допускается внутри protocol v4.</p>
 </section>
 <section id="section-2" class="doc-section searchable"><div class="section-kicker">Раздел 2</div><h2>Публичные модули</h2>
-<div class="table-wrap"><table><thead><tr><th>Модуль</th><th>Назначение</th></tr></thead><tbody><tr><td><code>audio</code></td><td>устройства CPAL, bounded input, WAV, downmix и resampling</td></tr><tr><td><code>commands</code></td><td>нормализация, exact matching, handler schema и registry</td></tr><tr><td><code>config</code></td><td>schema v2, миграция, валидация, AppData и atomic save</td></tr><tr><td><code>domain</code></td><td>состояния, события, запросы STT, результаты и ошибки</td></tr><tr><td><code>ipc</code></td><td>JSON envelope и Windows Named Pipe transport/client</td></tr><tr><td><code>metrics</code></td><td>lock-free counters, latency, CPU time и working set</td></tr><tr><td><code>models</code></td><td>pinned download, manifest, SHA-256, cancel и atomic activation</td></tr><tr><td><code>runtime</code></td><td>синхронная машина состояний и обработка одной команды</td></tr><tr><td><code>service</code></td><td>рекомендуемый dedicated task и cloneable handle</td></tr><tr><td><code>signal</code></td><td>VAD, pre-roll ring и bounded command collector</td></tr><tr><td><code>stt</code></td><td>persistent sherpa-onnx worker</td></tr><tr><td><code>wakeword</code></td><td>streaming open-vocabulary KWS</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Модуль</th><th>Назначение</th></tr></thead><tbody><tr><td><code>audio</code></td><td>устройства CPAL, bounded input, WAV, downmix и resampling</td></tr><tr><td><code>commands</code></td><td>нормализация, exact matching, handler schema и registry</td></tr><tr><td><code>config</code></td><td>schema v3, миграция, валидация, AppData и atomic save</td></tr><tr><td><code>domain</code></td><td>состояния, события, запросы STT, результаты и ошибки</td></tr><tr><td><code>ipc</code></td><td>JSON envelope и Windows Named Pipe transport/client</td></tr><tr><td><code>metrics</code></td><td>lock-free counters, latency, CPU time и working set</td></tr><tr><td><code>models</code></td><td>pinned download, manifest, SHA-256, cancel и atomic activation</td></tr><tr><td><code>runtime</code></td><td>синхронная машина состояний и обработка одной команды</td></tr><tr><td><code>service</code></td><td>рекомендуемый dedicated task и cloneable handle</td></tr><tr><td><code>signal</code></td><td>VAD, pre-roll ring и bounded command collector</td></tr><tr><td><code>stt</code></td><td>streaming supervised sherpa-onnx worker</td></tr><tr><td><code>wakeword</code></td><td>streaming open-vocabulary KWS с aliases</td></tr></tbody></table></div>
 <p>Корень crate повторно экспортирует основной стабильный application API: доменные типы, <code>CoreConfig</code>, <code>AppPaths</code>, handler API, runtime service, метрики и Windows IPC client. Low-level типы доступны через соответствующие модули.</p>
 </section>
 <section id="section-3" class="doc-section searchable"><div class="section-kicker">Раздел 3</div><h2>Рекомендуемое встраивание runtime</h2>
@@ -179,18 +179,19 @@ handlers.register(Arc::new(SetVolume))?;
 <p>Matching выполняется после <code>normalize</code>: lowercase, удаление пунктуации, схлопывание пробелов и опциональная замена <code>ё</code> → <code>е</code>. Сопоставление строгое: полная фраза либо полная фраза после известного wake-word prefix.</p>
 </section>
 <section id="section-7" class="doc-section searchable"><div class="section-kicker">Раздел 7</div><h2>Адаптеры STT, VAD и KWS</h2>
-<p><code>SpeechRecognizer::transcribe(TranscriptionRequest)</code> принимает owned mono <code>Vec&lt;f32&gt;</code> и <code>sample_rate</code>, возвращает <code>Transcript { text, confidence }</code>. Реализация не должна блокировать audio callback. Тяжёлый native inference работает в worker или <code>spawn_blocking</code>.</p>
+<p><code>SpeechRecognizer::transcribe(TranscriptionRequest)</code> сохраняет пакетный fallback. Методы <code>begin_stream</code>, <code>push_stream</code> и <code>finish_stream</code> позволяют начать decoding сразу после wake word; <code>recover</code> пересоздаёт поддерживающий это native worker после timeout. Реализация не должна блокировать audio callback.</p>
 <p><code>SherpaOnnxRecognizer::new(model_dir, threads, queue_capacity, metrics)</code>:</p>
 <ul>
 <li>проверяет обязательные ONNX/tokens файлы;</li>
-<li>создаёт один persistent native worker;</li>
+<li>создаёт, прогревает и supervises persistent native worker;</li>
 <li>использует bounded queue;</li>
 <li>отклоняет пустые, non-finite samples и нулевой sample rate;</li>
-<li>возвращает <code>CoreError::Recognition</code> при остановке worker.</li>
+<li>использует bounded exponential backoff и restart budget после timeout;</li>
+<li>при <code>threads = 0</code> выбирает доступный host parallelism.</li>
 </ul>
 <p><code>UnavailableRecognizer</code> позволяет daemon стартовать без модели. <code>MockRecognizer</code> предназначен для тестов.</p>
 <p><code>VoiceActivityDetector</code> имеет <code>reset</code> и <code>process</code>. <code>EnergyVad</code> сравнивает RMS с threshold. <code>AudioRingBuffer</code> хранит bounded pre-roll. <code>CommandCollector</code> завершает utterance по trailing silence либо hard maximum. <code>CommandAudioPipeline&lt;V&gt;</code> объединяет pre-roll, wake-word gate, VAD и collector; <code>push</code> возвращает <code>Some(Vec&lt;f32&gt;)</code> только для законченной команды.</p>
-<p><code>SherpaWakeWordDetector::new</code> загружает модель и кодирует keyword. <code>process</code> принимает streaming mono frame и возвращает <code>WakeWordDetection { keyword, start_time }</code>; <code>reset</code> очищает decoder state.</p>
+<p><code>SherpaWakeWordDetector::new_with_aliases</code> кодирует canonical keyword и aliases в одном detector. <code>process</code> принимает streaming mono frame и возвращает <code>WakeWordDetection { keyword, start_time }</code>; <code>reset</code> очищает decoder state.</p>
 </section>
 <section id="section-8" class="doc-section searchable"><div class="section-kicker">Раздел 8</div><h2>Audio API</h2>
 <p><code>list_input_devices</code> возвращает <code>AudioDeviceInfo { id, name, is_default }</code>. <code>default_input_device</code> сообщает текущий Windows default endpoint. <code>AudioInput::open(device_id, queue_capacity_frames, metrics)</code> открывает default/выбранный input и создаёт bounded callback queue; <code>device</code> возвращает реально открытый endpoint.</p>
@@ -209,10 +210,10 @@ handlers.register(Arc::new(SetVolume))?;
 </ul>
 <p><code>AudioError</code>: <code>Device</code>, <code>Stream</code>, <code>Disconnected</code>, <code>Wav</code>. Канонический внутренний формат — finite <code>f32</code>, mono, 16 кГц.</p>
 </section>
-<section id="section-9" class="doc-section searchable"><div class="section-kicker">Раздел 9</div><h2>Конфигурация schema v2</h2>
+<section id="section-9" class="doc-section searchable"><div class="section-kicker">Раздел 9</div><h2>Конфигурация schema v3</h2>
 <p><code>audio.device_id</code> должен быть непустым backend ID; значение <code>default</code> выбирает системное input-устройство.</p>
-<p>Неизвестные TOML-поля отклоняются. <code>CoreConfig::load</code> и <code>from_toml_str</code> мигрируют schema 1 → 2, затем валидируют. <code>save_atomic</code> пишет временный файл в том же каталоге и заменяет destination с write-through. <code>validate_with_handlers</code> дополнительно проверяет handler schema.</p>
-<div class="table-wrap"><table><thead><tr><th>Поле</th><th>Default</th><th>Ограничение</th></tr></thead><tbody><tr><td><code>audio.device_id</code></td><td><code>default</code></td><td>backend ID</td></tr><tr><td><code>audio.target_sample_rate</code></td><td>16000</td><td>только 16000</td></tr><tr><td><code>audio.channels</code></td><td>1</td><td>только 1</td></tr><tr><td><code>audio.frame_ms</code></td><td>20</td><td>5..=100</td></tr><tr><td><code>audio.pre_roll_ms</code></td><td>900</td><td>0..=5000</td></tr><tr><td><code>audio.queue_capacity_frames</code></td><td>250</td><td>1..=4096</td></tr><tr><td><code>audio.vad_threshold</code></td><td>0.015</td><td>finite 0..=1</td></tr><tr><td><code>audio.command_min_ms</code></td><td>300</td><td>≥ frame, ≤ max</td></tr><tr><td><code>audio.command_max_ms</code></td><td>10000</td><td>250..=60000</td></tr><tr><td><code>audio.trailing_silence_ms</code></td><td>700</td><td>≥ frame, ≤ command max</td></tr><tr><td><code>audio.reconnect_delay_ms</code></td><td>1000</td><td>100..=60000</td></tr><tr><td><code>audio.stall_timeout_ms</code></td><td>3000</td><td>500..=60000</td></tr><tr><td><code>matching.normalize_yo</code></td><td>true</td><td>bool</td></tr><tr><td><code>wake_word.keyword</code></td><td><code>ассистент</code></td><td>непустой</td></tr><tr><td><code>wake_word.score</code></td><td>1.5</td><td>finite, &gt;0 и ≤100</td></tr><tr><td><code>wake_word.threshold</code></td><td>0.35</td><td>finite 0..=1</td></tr><tr><td><code>wake_word.cooldown_ms</code></td><td>1200</td><td>0..=60000</td></tr><tr><td><code>inference.threads</code></td><td>4</td><td>1..=64</td></tr><tr><td><code>inference.queue_capacity</code></td><td>2</td><td>1..=64</td></tr><tr><td><code>inference.timeout_ms</code></td><td>30000</td><td>100..=300000</td></tr><tr><td><code>policy.confirmations_enabled</code></td><td>true</td><td>false отключает все confirmation</td></tr><tr><td><code>policy.confirmation_timeout_ms</code></td><td>15000</td><td>100..=300000</td></tr><tr><td><code>ipc.pipe_name</code></td><td><code>voice-assistant-core</code></td><td>ASCII alnum или <code>-</code></td></tr><tr><td><code>ipc.io_timeout_ms</code></td><td>30000</td><td>100..=300000</td></tr></tbody></table></div>
+<p>Неизвестные TOML-поля отклоняются. <code>CoreConfig::load</code> и <code>from_toml_str</code> мигрируют schema 1/2 → 3, затем валидируют. <code>save_atomic</code> пишет временный файл в том же каталоге и заменяет destination с write-through. <code>validate_with_handlers</code> дополнительно проверяет handler schema. <code>wake_word.aliases</code> задаёт дополнительные обращения; <code>inference.threads = 0</code> использует host parallelism; <code>max_restarts</code> и <code>restart_backoff_ms</code> ограничивают watchdog.</p>
+<div class="table-wrap"><table><thead><tr><th>Поле</th><th>Default</th><th>Ограничение</th></tr></thead><tbody><tr><td><code>audio.device_id</code></td><td><code>default</code></td><td>непустой backend ID</td></tr><tr><td><code>audio.target_sample_rate/channels</code></td><td>16000 / 1</td><td>canonical mono</td></tr><tr><td><code>audio.frame_ms</code></td><td>20</td><td>5..=100</td></tr><tr><td><code>audio.queue_capacity_frames</code></td><td>250</td><td>1..=4096</td></tr><tr><td><code>audio.vad_threshold</code></td><td>0.015</td><td>finite 0..=1</td></tr><tr><td><code>audio.reconnect_delay_ms</code></td><td>1000</td><td>100..=60000</td></tr><tr><td><code>wake_word.keyword</code></td><td><code>ассистент</code></td><td>непустой</td></tr><tr><td><code>wake_word.aliases</code></td><td><code>[]</code></td><td>непустые уникальные нормализованные фразы</td></tr><tr><td><code>wake_word.score/threshold</code></td><td>1.5 / 0.35</td><td>score &gt; 0, threshold 0..=1</td></tr><tr><td><code>inference.threads</code></td><td>0</td><td>0 = auto, иначе 1..=64</td></tr><tr><td><code>inference.queue_capacity</code></td><td>2</td><td>1..=64</td></tr><tr><td><code>inference.timeout_ms</code></td><td>30000</td><td>100..=300000</td></tr><tr><td><code>inference.max_restarts</code></td><td>3</td><td>0..=20</td></tr><tr><td><code>inference.restart_backoff_ms</code></td><td>500</td><td>100..=60000</td></tr><tr><td><code>policy.confirmations_enabled</code></td><td>true</td><td>false отключает все confirmation</td></tr><tr><td><code>ipc.pipe_name</code></td><td><code>voice-assistant-core</code></td><td>ASCII alnum или <code>-</code></td></tr></tbody></table></div>
 <p>Команды требуют уникальный непустой <code>id</code>, хотя бы одну непустую после нормализации phrase, непустой handler и timeout 1..=300000. Нормализованные phrases не могут пересекаться между командами.</p>
 <p><code>RiskLevel</code>: <code>low</code>, <code>medium</code>, <code>high</code>. При включённой policy подтверждение нужно, если <code>requires_confirmation = true</code> или risk <code>high</code>. При <code>confirmations_enabled = false</code> подтверждения полностью отключены.</p>
 <p><code>AppPaths::discover</code> использует:</p>
@@ -231,10 +232,10 @@ handlers.register(Arc::new(SetVolume))?;
 </ul>
 <p><code>ModelManager</code>:</p>
 <div class="table-wrap"><table><thead><tr><th>Метод</th><th>Результат</th></tr></thead><tbody><tr><td><code>new(root)</code></td><td>создаёт manager без I/O</td></tr><tr><td><code>install_alphacep_streaming_ru</code></td><td>устанавливает либо возвращает verified revision</td></tr><tr><td><code>install_alphacep_streaming_ru_with_control</code></td><td>то же с <code>AtomicBool</code> cancel и progress callback</td></tr><tr><td><code>resolve_alphacep_streaming_ru</code></td><td>offline resolve + verify</td></tr><tr><td><code>verify(directory)</code></td><td>проверяет metadata, safe relative paths, sizes и SHA-256</td></tr></tbody></table></div>
-<p>Установка копирует только <code>ALPHACEP_STREAMING_RU_FILES</code>, создаёт <code>ModelManifest</code>, проверяет temporary directory и активирует rename. Повреждённая установка помещается в quarantine и восстанавливается при неудачной замене. Cancel проверяется между файлами и до activation. Remote scripts не выполняются.</p>
+<p>До сети установка проверяет минимум 256 МиБ свободного места и возможность write/rename. Затем она копирует только <code>ALPHACEP_STREAMING_RU_FILES</code>, создаёт <code>ModelManifest</code>, проверяет temporary directory и активирует rename. Повреждённая установка помещается в quarantine и восстанавливается при неудачной замене. Remote scripts не выполняются.</p>
 <p><code>ModelStatus</code>: <code>missing</code>, <code>installing</code>, <code>loading</code>, <code>ready</code>, <code>failed</code>, <code>cancelled</code>. IPC запускается до blocking-загрузки STT, поэтому GUI видит <code>Starting</code>, текущий процент и <code>ModelLoadProgress</code>; shutdown и cancel отменяют загрузку кооперативно. <code>ModelError</code>: <code>Io</code>, <code>Hub</code>, <code>Manifest</code>, <code>Verification</code>, <code>Cancelled</code>.</p>
 </section>
-<section id="section-11" class="doc-section searchable"><div class="section-kicker">Раздел 11</div><h2>IPC wire protocol v3</h2>
+<section id="section-11" class="doc-section searchable"><div class="section-kicker">Раздел 11</div><h2>IPC wire protocol v4</h2>
 <p>Transport — <code>\\.\pipe\&lt;pipe_name&gt;</code>. Сервер:</p>
 <ul>
 <li>запрещает remote clients;</li>
@@ -248,11 +249,12 @@ handlers.register(Arc::new(SetVolume))?;
 <div class="code-block"><div class="code-head"><span>text</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-text">u32 little-endian JSON length
 UTF-8 JSON Envelope</code></pre></div>
 <div class="code-block"><div class="code-head"><span>json</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-json">{
-  &quot;protocol_version&quot;: 3,
+  &quot;protocol_version&quot;: 4,
   &quot;request_id&quot;: &quot;ui-42&quot;,
   &quot;payload&quot;: { &quot;type&quot;: &quot;get_health&quot; }
 }</code></pre></div>
 <div class="table-wrap"><table><thead><tr><th>Request</th><th>Успешный response</th></tr></thead><tbody><tr><td><code>get_status</code></td><td><code>status { state }</code></td></tr><tr><td><code>get_health</code></td><td><code>health { health }</code></td></tr><tr><td><code>get_config</code></td><td><code>config { config }</code></td></tr><tr><td><code>validate_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>apply_config { config }</code></td><td><code>accepted</code></td></tr><tr><td><code>list_audio_devices</code></td><td><code>audio_devices { devices }</code></td></tr><tr><td><code>get_metrics</code></td><td><code>metrics { metrics }</code></td></tr><tr><td><code>get_model_status</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>install_model</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_model_install</code></td><td><code>accepted</code></td></tr><tr><td><code>verify_model</code></td><td><code>model_status { status }</code></td></tr><tr><td><code>suspend_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>resume_listening</code></td><td><code>accepted</code></td></tr><tr><td><code>begin_capture</code></td><td><code>accepted</code></td></tr><tr><td><code>end_capture</code></td><td><code>accepted</code></td></tr><tr><td><code>submit_text { text }</code></td><td><code>accepted</code></td></tr><tr><td><code>confirm_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>cancel_command { confirmation_id }</code></td><td><code>accepted</code></td></tr><tr><td><code>subscribe_events</code></td><td><code>accepted</code>, затем только <code>event { event }</code></td></tr><tr><td><code>shutdown</code></td><td><code>accepted</code></td></tr></tbody></table></div>
+<p><code>list_handlers</code> возвращает <code>handlers { handlers }</code> со стабильными именами и required/optional allowlists. <code>HealthSnapshot.components</code> содержит <code>ComponentHealth</code> для audio, STT, runtime, model и IPC.</p>
 <p><code>HealthSnapshot.active_audio_device</code> содержит реально открытый input endpoint. При <code>audio.device_id = "default"</code> daemon автоматически переоткрывает поток после смены Windows default input. Если явно выбранное устройство исчезает, daemon временно открывает default, публикует <code>audio_device_fallback</code> и возвращается к выбранному устройству после его появления.</p>
 <p>Ошибка: <code>error { code, message }</code>. Коды: <code>invalid_request</code>, <code>protocol_version</code>, <code>configuration</code>, <code>audio</code>, <code>model</code>, <code>runtime_busy</code>, <code>confirmation</code>, <code>internal</code>.</p>
 <div class="code-block"><div class="code-head"><span>rust</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-rust">use std::time::Duration;
@@ -279,10 +281,11 @@ while let Ok(event) = events.next().await {
 <p>Library API возвращает типизированные ошибки. Daemon преобразует их в <code>IpcErrorCode</code>. <code>anyhow</code> используется только в CLI/daemon process boundary.</p>
 </section>
 <section id="section-13" class="doc-section searchable"><div class="section-kicker">Раздел 13</div><h2>Метрики</h2>
-<p><code>CoreMetrics</code> безопасно клонируется и использует atomics. Producers вызывают методы <code>audio_queued/dequeued/dropped/reconnected</code>, <code>stt_queued/dequeued</code>, <code>recoverable_error</code>, <code>command_completed</code>, <code>observe_kws/stt/handler</code>. <code>snapshot</code> возвращает:</p>
+<p><code>CoreMetrics</code> безопасно клонируется и использует atomics. Producers вызывают методы <code>audio_queued/dequeued/dropped/reconnected</code>, <code>stt_queued/dequeued/restarted/faulted</code>, <code>recoverable_error</code>, <code>command_completed</code>, <code>observe_kws/stt/handler</code>. <code>snapshot</code> возвращает:</p>
 <ul>
 <li>текущую/максимальную глубину audio и STT очередей;</li>
 <li>dropped audio frames, reconnects, recoverable errors, completed commands;</li>
+<li>STT worker restarts и exhausted restart budgets;</li>
 <li>last/max latency KWS (µs), STT и handler (ms);</li>
 <li><code>process_working_set_bytes</code>;</li>
 <li>накопленный <code>process_cpu_time_ms</code>.</li>
@@ -306,6 +309,7 @@ cargo run -p assistant-daemon -- --config C:\path\assistant.toml --models C:\pat
 </section>
 <section id="section-15" class="doc-section searchable"><div class="section-kicker">Раздел 15</div><h2>CLI</h2>
 <p>Глобальные опции: <code>--config &lt;path&gt;</code>, <code>--models &lt;path&gt;</code>.</p>
+<p><code>handlers</code> запрашивает у daemon установленные handler schemas для диагностики GUI capability discovery.</p>
 <div class="table-wrap"><table><thead><tr><th>Команда</th><th>Назначение</th></tr></thead><tbody><tr><td><code>devices</code></td><td>список input devices</td></tr><tr><td><code>record --device --seconds --output</code></td><td>запись WAV</td></tr><tr><td><code>validate-config</code></td><td>parse/migrate/structural validate</td></tr><tr><td><code>status</code></td><td><code>GetHealth</code> работающего daemon</td></tr><tr><td><code>soak --seconds</code></td><td>длительная проверка callback/reconnect/queues/process</td></tr><tr><td><code>run-text &lt;text&gt;</code></td><td>matcher → typed handler без микрофона</td></tr><tr><td><code>models install</code></td><td>синхронная установка stock model</td></tr><tr><td><code>models verify [directory]</code></td><td>offline manifest/SHA verify</td></tr><tr><td><code>transcribe &lt;wav&gt; [--model] [--threads]</code></td><td>STT одного WAV</td></tr><tr><td><code>test-wake-word &lt;wav&gt; [--model]</code></td><td>KWS одного WAV</td></tr><tr><td><code>evaluate &lt;wav&gt; [--model]</code></td><td>KWS и transcript вместе</td></tr></tbody></table></div>
 </section>
 <section id="section-16" class="doc-section searchable"><div class="section-kicker">Раздел 16</div><h2>Готовность приложения</h2>

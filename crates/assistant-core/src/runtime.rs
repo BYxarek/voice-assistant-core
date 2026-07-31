@@ -221,9 +221,24 @@ impl Runtime {
             .observe_stt(started.elapsed().as_millis() as u64);
         let transcript = match outcome {
             Ok(Ok(transcript)) => transcript,
-            Ok(Err(error)) => return self.fail("stt", error),
+            Ok(Err(error)) => {
+                if matches!(error, CoreError::Unavailable(_)) {
+                    let _ = self.events.send(AssistantEvent::TranscriptUnavailable {
+                        reason: crate::TranscriptUnavailableReason::ModelUnavailable,
+                    });
+                }
+                return self.fail("stt", error);
+            }
             Err(_) => return self.fail("stt", CoreError::Recognition("STT timed out".into())),
         };
+        if transcript.text.trim().is_empty() {
+            let _ = self.events.send(AssistantEvent::TranscriptUnavailable {
+                reason: crate::TranscriptUnavailableReason::Silence,
+            });
+            self.transition(AssistantState::MatchingCommand)?;
+            self.enter_cooldown()?;
+            return Ok(());
+        }
         let _ = self.events.send(AssistantEvent::TranscriptReady {
             text: transcript.text.clone(),
             confidence: transcript.confidence,
@@ -618,6 +633,58 @@ mod tests {
         runtime.process_text("открой блокнот".into()).await.unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(runtime.state(), AssistantState::Cooldown);
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_emits_transcript_reason() {
+        let mut runtime = Runtime::new(
+            Arc::new(UnavailableRecognizer {
+                message: "model missing".into(),
+            }),
+            CommandRegistry::new(Vec::new(), true),
+            Arc::new(CountingExecutor(Arc::new(AtomicUsize::new(0)))),
+            "assistant".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        let mut events = runtime.subscribe();
+        runtime.start().unwrap();
+        assert!(runtime.process_command_audio(request()).await.is_err());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+                event,
+                AssistantEvent::TranscriptUnavailable {
+                    reason: crate::TranscriptUnavailableReason::ModelUnavailable
+                }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_recognizer_output_is_reported_as_silence() {
+        let mut runtime = Runtime::new(
+            Arc::new(MockRecognizer { text: "  ".into() }),
+            CommandRegistry::new(Vec::new(), true),
+            Arc::new(CountingExecutor(Arc::new(AtomicUsize::new(0)))),
+            "assistant".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        let mut events = runtime.subscribe();
+        runtime.start().unwrap();
+        runtime.process_command_audio(request()).await.unwrap();
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+                event,
+                AssistantEvent::TranscriptUnavailable {
+                    reason: crate::TranscriptUnavailableReason::Silence
+                }
+            ))
+        );
     }
 
     #[test]

@@ -201,7 +201,7 @@ mod tests {
         let message = Envelope::new("golden-1", CoreRequest::GetStatus);
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
-            r#"{"protocol_version":2,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+            r#"{"protocol_version":3,"request_id":"golden-1","payload":{"type":"get_status"}}"#
         );
     }
 
@@ -210,7 +210,7 @@ mod tests {
         let begin = Envelope::new("manual-1", CoreRequest::BeginCapture);
         assert_eq!(
             String::from_utf8(encode(&begin).unwrap()).unwrap(),
-            r#"{"protocol_version":2,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
+            r#"{"protocol_version":3,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
         );
         let text = Envelope::new(
             "manual-2",
@@ -220,7 +220,33 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&text).unwrap()).unwrap(),
-            r#"{"protocol_version":2,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+            r#"{"protocol_version":3,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+        );
+    }
+
+    #[test]
+    fn microphone_diagnostic_events_have_stable_wire_formats() {
+        let level = Envelope::new(
+            "event-1",
+            CoreResponse::Event {
+                event: AssistantEvent::AudioLevel { rms: 0.25 },
+            },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&level).unwrap()).unwrap(),
+            r#"{"protocol_version":3,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
+        );
+        let unavailable = Envelope::new(
+            "event-2",
+            CoreResponse::Event {
+                event: AssistantEvent::TranscriptUnavailable {
+                    reason: crate::TranscriptUnavailableReason::Silence,
+                },
+            },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&unavailable).unwrap()).unwrap(),
+            r#"{"protocol_version":3,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
         );
     }
 }

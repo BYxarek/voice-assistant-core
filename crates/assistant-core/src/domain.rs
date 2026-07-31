@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::audio::AudioDeviceInfo;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Readiness and compatibility information returned to applications.
@@ -179,6 +179,16 @@ pub enum AssistantEvent {
         /// Optional recognizer confidence.
         confidence: Option<f32>,
     },
+    /// Current normalized microphone energy, throttled by the audio worker.
+    AudioLevel {
+        /// Root mean square of the latest mono frame.
+        rms: f32,
+    },
+    /// Audio did not produce a transcript.
+    TranscriptUnavailable {
+        /// Stable reason suitable for GUI messaging.
+        reason: TranscriptUnavailableReason,
+    },
     /// Exact matching selected a command.
     CommandMatched {
         /// Configured command identifier.
@@ -229,6 +239,13 @@ pub enum AssistantEvent {
         /// Newly opened input endpoint, or `None` while no endpoint is available.
         device: Option<AudioDeviceInfo>,
     },
+    /// A missing explicitly selected endpoint was temporarily replaced by the system default.
+    AudioDeviceFallback {
+        /// Configured endpoint that could not be opened.
+        requested_device_id: String,
+        /// System-default endpoint opened instead.
+        device: AudioDeviceInfo,
+    },
     /// Model installation advanced between allowlisted files.
     ModelInstallProgress {
         /// Completed allowlisted file count.
@@ -250,6 +267,20 @@ pub enum AssistantEvent {
         /// Pinned model commit SHA.
         revision: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Stable reason why no transcript was produced for observed or requested audio.
+pub enum TranscriptUnavailableReason {
+    /// Speech ended without the configured wake word.
+    WakeWordNotDetected,
+    /// Capture ended before `audio.command_min_ms`.
+    TooShort,
+    /// Capture contained no audio above the configured VAD threshold.
+    Silence,
+    /// No verified speech-recognition model is active.
+    ModelUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

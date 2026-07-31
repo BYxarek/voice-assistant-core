@@ -9,8 +9,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.1.0**. Публичный Rust extension API v1 и IPC
-protocol v2 готовы для разработки приложений. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.1.1**. Публичный Rust extension API v2 и IPC
+protocol v3. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -95,10 +95,10 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Публичный Rust API v1
+## Публичный Rust API v2
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
-`CORE_API_VERSION` равен `1`. В v1 входят:
+`CORE_API_VERSION` равен `2`. В v2 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
@@ -109,7 +109,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v2; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v3; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -152,7 +152,7 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v2
+## IPC protocol v3
 
 Pipe по умолчанию: `\\.\pipe\voice-assistant-core`. Сервер допускает только
 локальных клиентов, защищён DACL и разрешает один daemon на pipe. Каждый JSON
@@ -177,10 +177,18 @@ prefix и применяет те же risk, confirmation и timeout rules.
 кратковременное подключение. `subscribe_events` создаёт отдельный
 `EventSubscription`. Ошибки имеют стабильный `IpcErrorCode`.
 
+Поток событий публикует `audio_level { rms }` не чаще 10 раз в секунду и
+`transcript_unavailable { reason }`. Причины: `wake_word_not_detected`,
+`too_short`, `silence`, `model_unavailable`. `audio.device_id` не может быть
+пустым; для системного input используется значение `default`.
+
 При `audio.device_id = "default"` worker проверяет текущий Windows input endpoint
 и автоматически переоткрывает поток после его смены. `HealthSnapshot` содержит
 `active_audio_device`, а подписчики получают `audio_device_changed`; значение
 `None` означает, что рабочий input endpoint временно недоступен.
+Если явно выбранный endpoint исчез, daemon временно открывает системный default,
+публикует `audio_device_fallback { requested_device_id, device }` и возвращается
+к выбранному endpoint после его появления.
 
 Применение конфигурации выполняется только из `Idle`/`Suspended`. После миграции
 и проверки runtime меняет только затронутые компоненты: команды, подтверждения

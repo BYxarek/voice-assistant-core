@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.1] — 2026-07-31
+
+### Добавлено
+
+- IPC protocol v3: `audio_level`, причины `transcript_unavailable` и предупреждение
+  `audio_device_fallback` при временной замене исчезнувшего выбранного микрофона.
+
+### Изменено
+
+- пустой `audio.device_id` отклоняется при валидации конфигурации;
+- публичный Rust extension API увеличен до v2 из-за новых вариантов событий.
+
 ## [1.1.0] — 2026-07-30
 
 ### Добавлено
@@ -44,3 +56,4 @@
 [1.0.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.0
 [1.0.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.0.1
 [1.1.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.0
+[1.1.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.1

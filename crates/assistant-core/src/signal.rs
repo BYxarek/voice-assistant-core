@@ -35,16 +35,25 @@ impl VoiceActivityDetector for EnergyVad {
     fn reset(&mut self) {}
 
     fn process(&mut self, frame: &[f32]) -> VadDecision {
-        if frame.is_empty() {
-            return VadDecision::Silence;
-        }
-        let rms =
-            (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt();
-        if rms >= self.threshold {
+        if rms(frame) >= self.threshold {
             VadDecision::Speech
         } else {
             VadDecision::Silence
         }
+    }
+}
+
+/// Returns root-mean-square energy for one normalized mono frame.
+pub fn rms(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    let value =
+        (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt();
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -246,6 +255,13 @@ mod tests {
         let mut ring = AudioRingBuffer::new(0);
         ring.push(&[1.0]);
         assert!(ring.snapshot().is_empty());
+    }
+
+    #[test]
+    fn rms_reports_normalized_frame_energy() {
+        assert_eq!(rms(&[]), 0.0);
+        assert!((rms(&[1.0, -1.0]) - 1.0).abs() < f32::EPSILON);
+        assert_eq!(rms(&[f32::NAN]), 0.0);
     }
 
     #[test]

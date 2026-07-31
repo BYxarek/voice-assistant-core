@@ -385,6 +385,12 @@ impl CoreConfig {
                 "audio must use the canonical 16 kHz mono format".into(),
             ));
         }
+        if self.audio.device_id.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "audio.device_id must be non-empty; use \"default\" for the system input device"
+                    .into(),
+            ));
+        }
         if !(5..=100).contains(&self.audio.frame_ms)
             || self.audio.pre_roll_ms > 5_000
             || !(1..=4_096).contains(&self.audio.queue_capacity_frames)
@@ -531,6 +537,16 @@ mod tests {
     #[test]
     fn example_is_valid() {
         valid_config().validate().unwrap();
+    }
+
+    #[test]
+    fn empty_audio_device_id_is_rejected_with_actionable_error() {
+        let mut config = valid_config();
+        config.audio.device_id = "  ".into();
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "invalid config: audio.device_id must be non-empty; use \"default\" for the system input device"
+        );
     }
 
     #[test]

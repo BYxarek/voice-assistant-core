@@ -12,8 +12,10 @@ use assistant_core::{
     AppPaths, AssistantEvent, AssistantState, CORE_API_VERSION, CORE_VERSION, CommandExecutor,
     CommandRegistry, CoreConfig, CoreError, CoreMetrics, HealthSnapshot, ModelStatus,
     PROTOCOL_VERSION, Runtime, RuntimeComponents, RuntimeHandle, RuntimeUpdate, SpeechRecognizer,
-    TranscriptionRequest, UnavailableRecognizer,
-    audio::{AudioDeviceInfo, AudioInput, default_input_device, resample_linear},
+    TranscriptUnavailableReason, TranscriptionRequest, UnavailableRecognizer,
+    audio::{
+        AudioDeviceInfo, AudioInput, default_input_device, list_input_devices, resample_linear,
+    },
     builtin_handlers,
     config::CURRENT_CONFIG_VERSION,
     ipc::{
@@ -23,7 +25,7 @@ use assistant_core::{
     models::{
         ALPHACEP_STREAMING_RU_FILES, ALPHACEP_STREAMING_RU_REVISION, ModelError, ModelManager,
     },
-    signal::{CommandAudioPipeline, EnergyVad},
+    signal::{CommandAudioPipeline, EnergyVad, rms},
     spawn_runtime_service,
     stt::SherpaOnnxRecognizer,
     wakeword::SherpaWakeWordDetector,
@@ -81,7 +83,14 @@ enum PipelineMessage {
     WakeWord,
     Command(TranscriptionRequest),
     CaptureCancelled,
+    CaptureUnavailable(TranscriptUnavailableReason),
+    TranscriptUnavailable(TranscriptUnavailableReason),
+    AudioLevel(f32),
     AudioDeviceChanged(Option<AudioDeviceInfo>),
+    AudioDeviceFallback {
+        requested_device_id: String,
+        device: AudioDeviceInfo,
+    },
     AudioError(String),
 }
 
@@ -90,6 +99,38 @@ const MANUAL_CAPTURE_RESERVING: u8 = 1;
 const MANUAL_CAPTURE_BEGIN: u8 = 2;
 const MANUAL_CAPTURE_ACTIVE: u8 = 3;
 const MANUAL_CAPTURE_FINISH: u8 = 4;
+
+#[derive(Default)]
+struct MissedWakeWord {
+    speech: bool,
+    silence_samples: usize,
+}
+
+impl MissedWakeWord {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn observe(
+        &mut self,
+        frame_rms: f32,
+        threshold: f32,
+        frame_samples: usize,
+        trailing_silence_samples: usize,
+    ) -> bool {
+        if frame_rms >= threshold {
+            self.speech = true;
+            self.silence_samples = 0;
+        } else if self.speech {
+            self.silence_samples = self.silence_samples.saturating_add(frame_samples);
+        }
+        let missed = self.speech && self.silence_samples >= trailing_silence_samples;
+        if missed {
+            self.reset();
+        }
+        missed
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -199,9 +240,32 @@ async fn main() -> anyhow::Result<()> {
                         tracing::debug!(%error, "manual capture cancellation ignored");
                     }
                 }
+                PipelineMessage::CaptureUnavailable(reason) => {
+                    bridge_context
+                        .runtime
+                        .publish_event(AssistantEvent::TranscriptUnavailable { reason });
+                    if let Err(error) = bridge_context.runtime.cancel_capture().await {
+                        tracing::debug!(%error, "capture cancellation ignored");
+                    }
+                }
+                PipelineMessage::TranscriptUnavailable(reason) => bridge_context
+                    .runtime
+                    .publish_event(AssistantEvent::TranscriptUnavailable { reason }),
+                PipelineMessage::AudioLevel(rms) => bridge_context
+                    .runtime
+                    .publish_event(AssistantEvent::AudioLevel { rms }),
                 PipelineMessage::AudioDeviceChanged(device) => {
                     set_active_audio_device(&bridge_context, device);
                 }
+                PipelineMessage::AudioDeviceFallback {
+                    requested_device_id,
+                    device,
+                } => bridge_context
+                    .runtime
+                    .publish_event(AssistantEvent::AudioDeviceFallback {
+                        requested_device_id,
+                        device,
+                    }),
                 PipelineMessage::AudioError(message) => {
                     set_last_error(&bridge_context, Some(message.clone()));
                     bridge_context.runtime.report_recoverable("audio", message);
@@ -360,6 +424,16 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
             if !context.listening.load(Ordering::Acquire)
                 || !context.audio_ready.load(Ordering::Acquire)
             {
+                if !matches!(
+                    context.model_status.lock().as_deref(),
+                    Ok(ModelStatus::Ready { .. })
+                ) {
+                    context
+                        .runtime
+                        .publish_event(AssistantEvent::TranscriptUnavailable {
+                            reason: TranscriptUnavailableReason::ModelUnavailable,
+                        });
+                }
                 return error_response(IpcErrorCode::Audio, "audio input is not ready");
             }
             if context
@@ -1076,12 +1150,38 @@ fn audio_session(
     generation: &AtomicU64,
     expected_generation: u64,
 ) -> Result<SessionEnd, String> {
-    let input = AudioInput::open(
+    let requested_device_id = &config.audio.device_id;
+    let (input, using_fallback) = match AudioInput::open(
         &config.audio.device_id,
         config.audio.queue_capacity_frames,
         metrics.clone(),
-    )
-    .map_err(|error| error.to_string())?;
+    ) {
+        Ok(input) => (input, false),
+        Err(selected_error)
+            if requested_device_id != "default"
+                && !list_input_devices()
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .any(|device| device.id.as_str() == requested_device_id) =>
+        {
+            let fallback = AudioInput::open(
+                "default",
+                config.audio.queue_capacity_frames,
+                metrics.clone(),
+            )
+            .map_err(|fallback_error| {
+                format!("{selected_error}; system default fallback failed: {fallback_error}")
+            })?;
+            commands
+                .blocking_send(PipelineMessage::AudioDeviceFallback {
+                    requested_device_id: requested_device_id.clone(),
+                    device: fallback.device().clone(),
+                })
+                .map_err(|_| "runtime command queue closed".to_string())?;
+            (fallback, true)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     commands
         .blocking_send(PipelineMessage::AudioDeviceChanged(Some(
             input.device().clone(),
@@ -1101,6 +1201,8 @@ fn audio_session(
     let mut cooldown_until = Instant::now();
     let mut last_audio = Instant::now();
     let mut last_device_check = Instant::now();
+    let mut last_level = Instant::now() - Duration::from_millis(100);
+    let mut missed_wake_word = MissedWakeWord::default();
 
     while !stopping.load(Ordering::Acquire) {
         if generation.load(Ordering::Acquire) != expected_generation {
@@ -1108,12 +1210,23 @@ fn audio_session(
             return Ok(SessionEnd::Reconfigured);
         }
         // ponytail: poll once per second; use IMMNotificationClient if sub-second switching matters.
-        if config.audio.device_id == "default"
+        if (config.audio.device_id == "default" || using_fallback)
             && last_device_check.elapsed() >= Duration::from_secs(1)
         {
             last_device_check = Instant::now();
-            let current = default_input_device().map_err(|error| error.to_string())?;
-            if should_reopen_default(&config.audio.device_id, &input.device().id, &current.id) {
+            let current_default = default_input_device().map_err(|error| error.to_string())?;
+            let reopen = should_reopen_audio(
+                &config.audio.device_id,
+                &input.device().id,
+                &current_default.id,
+                using_fallback,
+                using_fallback
+                    && list_input_devices()
+                        .map_err(|error| error.to_string())?
+                        .iter()
+                        .any(|device| device.id == config.audio.device_id),
+            );
+            if reopen {
                 ready.store(false, Ordering::Release);
                 let manual_active = manual_capture.swap(MANUAL_CAPTURE_IDLE, Ordering::AcqRel)
                     != MANUAL_CAPTURE_IDLE;
@@ -1140,10 +1253,16 @@ fn audio_session(
         buffered.extend(resample_linear(&block, input.source_rate(), target_rate));
         while buffered.len() >= frame_samples {
             let frame: Vec<f32> = buffered.drain(..frame_samples).collect();
+            let frame_rms = rms(&frame);
+            if last_level.elapsed() >= Duration::from_millis(100) {
+                let _ = commands.try_send(PipelineMessage::AudioLevel(frame_rms));
+                last_level = Instant::now();
+            }
             if !listening.load(Ordering::Acquire) {
                 pipeline.reset();
                 detector.reset();
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
+                missed_wake_word.reset();
                 continue;
             }
             let manual_state = manual_capture.load(Ordering::Acquire);
@@ -1166,12 +1285,18 @@ fn audio_session(
                 }
                 let captured = pipeline.finish();
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
-                let message = captured.map_or(PipelineMessage::CaptureCancelled, |samples| {
-                    PipelineMessage::Command(TranscriptionRequest {
+                let message = match captured {
+                    None => {
+                        PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::TooShort)
+                    }
+                    Some(samples) if rms(&samples) < config.audio.vad_threshold => {
+                        PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)
+                    }
+                    Some(samples) => PipelineMessage::Command(TranscriptionRequest {
                         samples,
                         sample_rate: target_rate,
-                    })
-                });
+                    }),
+                };
                 commands
                     .blocking_send(message)
                     .map_err(|_| "runtime command queue closed".to_string())?;
@@ -1195,13 +1320,35 @@ fn audio_session(
             } else {
                 false
             };
+            if detected {
+                missed_wake_word.reset();
+            } else if manual_capture.load(Ordering::Acquire) == MANUAL_CAPTURE_IDLE
+                && !pipeline.is_collecting()
+                && Instant::now() >= cooldown_until
+                && missed_wake_word.observe(
+                    frame_rms,
+                    config.audio.vad_threshold,
+                    frame.len(),
+                    samples_for_ms(target_rate, config.audio.trailing_silence_ms),
+                )
+            {
+                let _ = commands.try_send(PipelineMessage::TranscriptUnavailable(
+                    TranscriptUnavailableReason::WakeWordNotDetected,
+                ));
+            }
+            let was_manual = manual_capture.load(Ordering::Acquire) != MANUAL_CAPTURE_IDLE;
             if let Some(samples) = pipeline.push(&frame, detected) {
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
-                commands
-                    .blocking_send(PipelineMessage::Command(TranscriptionRequest {
+                let message = if was_manual && rms(&samples) < config.audio.vad_threshold {
+                    PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)
+                } else {
+                    PipelineMessage::Command(TranscriptionRequest {
                         samples,
                         sample_rate: target_rate,
-                    }))
+                    })
+                };
+                commands
+                    .blocking_send(message)
                     .map_err(|_| "runtime command queue closed".to_string())?;
                 cooldown_until =
                     Instant::now() + Duration::from_millis(config.wake_word.cooldown_ms);
@@ -1212,8 +1359,15 @@ fn audio_session(
     Ok(SessionEnd::Stopped)
 }
 
-fn should_reopen_default(configured_id: &str, active_id: &str, current_default_id: &str) -> bool {
-    configured_id == "default" && active_id != current_default_id
+fn should_reopen_audio(
+    configured_id: &str,
+    active_id: &str,
+    current_default_id: &str,
+    using_fallback: bool,
+    selected_available: bool,
+) -> bool {
+    (configured_id == "default" || using_fallback) && active_id != current_default_id
+        || using_fallback && selected_available
 }
 
 fn samples_for_ms(sample_rate: u32, milliseconds: u32) -> usize {
@@ -1232,21 +1386,43 @@ mod tests {
 
     #[test]
     fn only_a_changed_default_device_reopens_the_session() {
-        assert!(should_reopen_default(
+        assert!(should_reopen_audio(
             "default",
             "microphone-a",
-            "microphone-b"
+            "microphone-b",
+            false,
+            false
         ));
-        assert!(!should_reopen_default(
+        assert!(!should_reopen_audio(
             "default",
             "microphone-a",
-            "microphone-a"
+            "microphone-a",
+            false,
+            false
         ));
-        assert!(!should_reopen_default(
+        assert!(!should_reopen_audio(
             "microphone-a",
             "microphone-a",
-            "microphone-b"
+            "microphone-b",
+            false,
+            false
         ));
+        assert!(should_reopen_audio(
+            "microphone-a",
+            "default-a",
+            "default-a",
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn missed_wake_word_is_reported_after_trailing_silence() {
+        let mut tracker = MissedWakeWord::default();
+        assert!(!tracker.observe(0.2, 0.1, 10, 20));
+        assert!(!tracker.observe(0.0, 0.1, 10, 20));
+        assert!(tracker.observe(0.0, 0.1, 10, 20));
+        assert!(!tracker.observe(0.0, 0.1, 10, 20));
     }
 
     #[test]

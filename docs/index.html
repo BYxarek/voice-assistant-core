@@ -75,7 +75,7 @@ cargo run -p assistant-cli -- status</code></pre>
       <tr><td>IPC client</td><td><code>CoreIpcClient</code>, <code>EventSubscription</code>, request/response/envelope/error types</td></tr>
       <tr><td>Domain</td><td>config, states, events, health, model status, typed errors and metrics</td></tr>
     </table>
-    <p><code>CORE_API_VERSION = 2</code>. Ломающие Rust-изменения требуют новой
+    <p><code>CORE_API_VERSION = 3</code>. Ломающие Rust-изменения требуют новой
       major-версии API. Несовместимое изменение wire-формата требует новой
       <code>PROTOCOL_VERSION</code>.</p>
 
@@ -146,6 +146,16 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       <code>inference.threads = 0</code> выбирает host parallelism, а
       <code>max_restarts</code>/<code>restart_backoff_ms</code> ограничивают
       автоматическое восстановление STT.</p>
+    <pre><code>schema_version = 4
+
+[inference]
+model = "alphacep/vosk-model-small-ru"
+threads = 0
+
+[wake_word]
+model = "alphacep/vosk-model-streaming-ru"
+keyword = "ассистент"
+aliases = ["помощник"]</code></pre>
     <div class="note"><code>policy.confirmations_enabled = false</code> полностью
       отключает подтверждения, включая high-risk команды. Это явное снижение
       защиты.</div>
@@ -155,6 +165,11 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       для русского, бенгальского, таджикского и узбекского языков. Online-модели
       распознаются во время захвата, offline-модели получают завершённую запись.
       <code>assistant-cli models list</code> показывает режим и совместимость с KWS.</p>
+    <pre><code>cargo run -p assistant-cli -- models list
+cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
+cargo run -p assistant-cli -- models install alphacep/vosk-model-streaming-ru
+cargo run -p assistant-cli -- validate-config
+cargo run -p assistant-cli -- transcribe .\command.wav</code></pre>
     <p>Установка использует фиксированный commit SHA, allowlist файлов и
       SHA-256 manifest. Прогресс и отмена установки и blocking-загрузки STT
       доступны через IPC. Активация

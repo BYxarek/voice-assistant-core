@@ -103,7 +103,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 ## Публичный Rust API v3
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
-`CORE_API_VERSION` равен `2`. В v2 входят:
+`CORE_API_VERSION` равен `3`. В v3 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
@@ -260,6 +260,30 @@ cargo run -p assistant-cli -- models list
 cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
 ```
 
+Пример: offline STT и отдельная streaming-модель для wake word:
+
+```toml
+schema_version = 4
+
+[inference]
+model = "alphacep/vosk-model-small-ru"
+threads = 0
+
+[wake_word]
+model = "alphacep/vosk-model-streaming-ru"
+keyword = "ассистент"
+aliases = ["помощник"]
+```
+
+Установить обе модели, проверить конфигурацию и распознать WAV:
+
+```powershell
+cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
+cargo run -p assistant-cli -- models install alphacep/vosk-model-streaming-ru
+cargo run -p assistant-cli -- validate-config
+cargo run -p assistant-cli -- transcribe .\command.wav
+```
+
 `inference.model` выбирает STT, а `wake_word.model` — отдельную online-модель
 KWS с `lang/bpe.model`. Offline-модели и модели без SentencePiece доступны для
 STT, но намеренно отклоняются как wake-word модель. Смена модели через
@@ -271,6 +295,37 @@ models\<repo-name>\<revision>\
 ├── manifest.toml
 ├── am-onnx\
 └── lang\
+```
+
+Прямое использование каталога и recognizer из Rust:
+
+```rust,no_run
+use assistant_core::{
+    CoreMetrics, SpeechRecognizer, TranscriptionRequest,
+    audio::read_wav_mono,
+    models::{ModelManager, model_spec},
+    stt::SherpaOnnxRecognizer,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model_id = "alphacep/vosk-model-small-ru";
+    let manager = ModelManager::new(r"C:\VoiceAssistantCore\models");
+    let directory = manager.resolve(model_id)?;
+    let (samples, sample_rate) = read_wav_mono(r"C:\audio\command.wav")?;
+    let recognizer = SherpaOnnxRecognizer::new_for_model(
+        directory,
+        model_spec(model_id)?,
+        0,
+        2,
+        CoreMetrics::default(),
+    )?;
+    let transcript = recognizer
+        .transcribe(TranscriptionRequest { samples, sample_rate })
+        .await?;
+    println!("{}", transcript.text);
+    Ok(())
+}
 ```
 
 Перед загрузкой проверяются запись/rename в каталоге и минимум 256 МиБ свободного места.

@@ -69,7 +69,8 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum ModelCommand {
-    Install,
+    List,
+    Install { model: Option<String> },
     Verify { directory: Option<PathBuf> },
 }
 
@@ -113,6 +114,13 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::ValidateConfig => {
             let config = CoreConfig::load(&config_path)?;
             config.validate_with_handlers(&builtin_handlers(&config.commands)?)?;
+            assistant_core::models::model_spec(&config.inference.model)?;
+            let wake_model = assistant_core::models::model_spec(&config.wake_word.model)?;
+            anyhow::ensure!(
+                wake_model.supports_wake_word(),
+                "model {} cannot be used for wake-word detection",
+                wake_model.id()
+            );
             println!("configuration is valid");
         }
         CliCommand::Status => {
@@ -213,16 +221,29 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         CliCommand::Models { command } => {
-            use assistant_core::models::ModelManager;
+            use assistant_core::models::{ALPHACEP_MODELS, ModelManager};
             let manager = ModelManager::new(&models_path);
             match command {
-                ModelCommand::Install => {
-                    println!("{}", manager.install_alphacep_streaming_ru()?.display());
+                ModelCommand::List => {
+                    for model in ALPHACEP_MODELS {
+                        println!(
+                            "{} language={} mode={:?} wake_word={}",
+                            model.id(),
+                            model.language(),
+                            model.mode(),
+                            model.supports_wake_word()
+                        );
+                    }
+                }
+                ModelCommand::Install { model } => {
+                    let model = model.unwrap_or(CoreConfig::load(&config_path)?.inference.model);
+                    println!("{}", manager.install(&model)?.display());
                 }
                 ModelCommand::Verify { directory } => {
+                    let model = CoreConfig::load(&config_path)?.inference.model;
                     let directory = match directory {
                         Some(directory) => directory,
-                        None => manager.resolve_alphacep_streaming_ru()?,
+                        None => manager.resolve(&model)?,
                     };
                     let manifest = manager.verify(directory)?;
                     println!(
@@ -242,15 +263,18 @@ async fn main() -> anyhow::Result<()> {
                 SpeechRecognizer, audio::read_wav_mono, stt::SherpaOnnxRecognizer,
             };
             let (samples, sample_rate) = read_wav_mono(input)?;
+            let config = CoreConfig::load(&config_path)?;
+            let spec = assistant_core::models::model_spec(&config.inference.model)?;
             let model = match model {
                 Some(model) => model,
                 None => assistant_core::models::ModelManager::new(&models_path)
-                    .resolve_alphacep_streaming_ru()?,
+                    .resolve(&config.inference.model)?,
             };
-            let transcript = SherpaOnnxRecognizer::new(
+            let transcript = SherpaOnnxRecognizer::new_for_model(
                 model,
+                spec,
                 threads,
-                CoreConfig::load(&config_path)?.inference.queue_capacity,
+                config.inference.queue_capacity,
                 assistant_core::CoreMetrics::default(),
             )?
             .transcribe(TranscriptionRequest {
@@ -264,15 +288,17 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::TestWakeWord { input, model } => {
             use assistant_core::{audio::read_wav_mono, wakeword::SherpaWakeWordDetector};
             let config = CoreConfig::load(&config_path)?;
+            let spec = assistant_core::models::model_spec(&config.wake_word.model)?;
             let (samples, sample_rate) = read_wav_mono(input)?;
             let model = match model {
                 Some(model) => model,
                 None => assistant_core::models::ModelManager::new(&models_path)
-                    .resolve_alphacep_streaming_ru()?,
+                    .resolve(&config.wake_word.model)?,
             };
-            let mut detector = SherpaWakeWordDetector::new(
+            let mut detector = SherpaWakeWordDetector::new_for_model_with_aliases(
                 model,
-                &config.wake_word.keyword,
+                spec,
+                std::iter::once(config.wake_word.keyword.as_str()),
                 config.wake_word.score,
                 config.wake_word.threshold,
                 1,
@@ -295,15 +321,20 @@ async fn main() -> anyhow::Result<()> {
                 wakeword::SherpaWakeWordDetector,
             };
             let config = CoreConfig::load(&config_path)?;
+            let stt_spec = assistant_core::models::model_spec(&config.inference.model)?;
+            let wake_spec = assistant_core::models::model_spec(&config.wake_word.model)?;
             let (samples, sample_rate) = read_wav_mono(input)?;
             let model = match model {
                 Some(model) => model,
                 None => assistant_core::models::ModelManager::new(&models_path)
-                    .resolve_alphacep_streaming_ru()?,
+                    .resolve(&config.inference.model)?,
             };
-            let mut detector = SherpaWakeWordDetector::new(
-                &model,
-                &config.wake_word.keyword,
+            let wake_model = assistant_core::models::ModelManager::new(&models_path)
+                .resolve(&config.wake_word.model)?;
+            let mut detector = SherpaWakeWordDetector::new_for_model_with_aliases(
+                wake_model,
+                wake_spec,
+                std::iter::once(config.wake_word.keyword.as_str()),
                 config.wake_word.score,
                 config.wake_word.threshold,
                 1,
@@ -312,8 +343,9 @@ async fn main() -> anyhow::Result<()> {
             let wake_word = samples
                 .chunks((sample_rate / 50) as usize)
                 .find_map(|frame| detector.process(frame));
-            let transcript = SherpaOnnxRecognizer::new(
+            let transcript = SherpaOnnxRecognizer::new_for_model(
                 model,
+                stt_spec,
                 config.inference.threads,
                 config.inference.queue_capacity,
                 CoreMetrics::default(),

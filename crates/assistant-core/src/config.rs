@@ -10,7 +10,10 @@ use thiserror::Error;
 use crate::commands::{HandlerRegistry, normalize};
 
 /// Current on-disk and IPC configuration schema.
-pub const CURRENT_CONFIG_VERSION: u16 = 3;
+pub const CURRENT_CONFIG_VERSION: u16 = 4;
+
+/// Default pinned Alphacep model used for both STT and wake-word detection.
+pub const DEFAULT_MODEL_ID: &str = "alphacep/vosk-model-streaming-ru";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +111,8 @@ impl Default for MatchingConfig {
 #[serde(default, deny_unknown_fields)]
 /// Open-vocabulary wake-word detector settings.
 pub struct WakeWordConfig {
+    /// Pinned model catalog identifier used by the keyword spotter.
+    pub model: String,
     /// Phrase required before a command.
     pub keyword: String,
     /// Additional phrases accepted by the same detector and command matcher.
@@ -123,6 +128,7 @@ pub struct WakeWordConfig {
 impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
+            model: DEFAULT_MODEL_ID.into(),
             keyword: "ассистент".into(),
             aliases: Vec::new(),
             score: 1.5,
@@ -136,6 +142,8 @@ impl Default for WakeWordConfig {
 #[serde(default, deny_unknown_fields)]
 /// Native STT worker limits.
 pub struct InferenceConfig {
+    /// Pinned model catalog identifier used for transcription.
+    pub model: String,
     /// Native inference thread count; zero selects the host parallelism automatically.
     pub threads: i32,
     /// Maximum queued STT requests.
@@ -151,6 +159,7 @@ pub struct InferenceConfig {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
+            model: DEFAULT_MODEL_ID.into(),
             threads: 0,
             queue_capacity: 2,
             timeout_ms: 30_000,
@@ -313,7 +322,7 @@ impl CoreConfig {
             .and_then(toml::Value::as_integer)
             .ok_or_else(|| ConfigError::Validation("schema_version is required".into()))?;
         match version {
-            1 | 2 => {
+            1..=3 => {
                 value["schema_version"] = toml::Value::Integer(CURRENT_CONFIG_VERSION.into());
             }
             version if version == i64::from(CURRENT_CONFIG_VERSION) => {}
@@ -334,7 +343,7 @@ impl CoreConfig {
     /// Migrates an IPC-supplied configuration object to the current schema.
     pub fn migrate(mut self) -> Result<Self, ConfigError> {
         match self.schema_version {
-            1 | 2 => self.schema_version = CURRENT_CONFIG_VERSION,
+            1..=3 => self.schema_version = CURRENT_CONFIG_VERSION,
             CURRENT_CONFIG_VERSION => {}
             version => {
                 return Err(ConfigError::Validation(format!(
@@ -431,6 +440,11 @@ impl CoreConfig {
         {
             return Err(ConfigError::Validation(
                 "wake word must be non-empty, score positive and threshold within 0..=1".into(),
+            ));
+        }
+        if self.wake_word.model.trim().is_empty() || self.inference.model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "wake-word and STT model identifiers must be non-empty".into(),
             ));
         }
         if !(0..=64).contains(&self.inference.threads)
@@ -577,7 +591,7 @@ mod tests {
     #[test]
     fn schema_one_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 3",
+            "schema_version = 4",
             "schema_version = 1",
             1,
         );
@@ -590,7 +604,7 @@ mod tests {
     #[test]
     fn schema_two_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 3",
+            "schema_version = 4",
             "schema_version = 2",
             1,
         );
@@ -598,6 +612,18 @@ mod tests {
             CoreConfig::from_toml_str(&text).unwrap().schema_version,
             CURRENT_CONFIG_VERSION
         );
+    }
+
+    #[test]
+    fn schema_three_is_migrated() {
+        let text = include_str!("../../../config/assistant.example.toml")
+            .replacen("schema_version = 4", "schema_version = 3", 1)
+            .replace("model = \"alphacep/vosk-model-streaming-ru\"\r\n", "")
+            .replace("model = \"alphacep/vosk-model-streaming-ru\"\n", "");
+        let config = CoreConfig::from_toml_str(&text).unwrap();
+        assert_eq!(config.schema_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.inference.model, DEFAULT_MODEL_ID);
+        assert_eq!(config.wake_word.model, DEFAULT_MODEL_ID);
     }
 
     #[test]

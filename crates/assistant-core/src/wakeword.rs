@@ -4,6 +4,8 @@ use sentencepiece_rs::SentencePieceProcessor;
 use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig, OnlineStream};
 use thiserror::Error;
 
+use crate::models::{ModelSpec, model_spec};
+
 #[derive(Debug, Clone, PartialEq)]
 /// One accepted wake-word occurrence.
 pub struct WakeWordDetection {
@@ -57,6 +59,36 @@ impl SherpaWakeWordDetector {
         threads: i32,
         sample_rate: u32,
     ) -> Result<Self, WakeWordError> {
+        let model = model_spec(crate::config::DEFAULT_MODEL_ID)
+            .map_err(|error| WakeWordError::Configuration(error.to_string()))?;
+        Self::new_for_model_with_aliases(
+            model_directory,
+            model,
+            keywords,
+            score,
+            threshold,
+            threads,
+            sample_rate,
+        )
+    }
+
+    /// Loads an explicit compatible catalog model and all configured aliases.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_model_with_aliases<'a>(
+        model_directory: impl Into<PathBuf>,
+        model: ModelSpec,
+        keywords: impl IntoIterator<Item = &'a str>,
+        score: f32,
+        threshold: f32,
+        threads: i32,
+        sample_rate: u32,
+    ) -> Result<Self, WakeWordError> {
+        if !model.supports_wake_word() {
+            return Err(WakeWordError::Configuration(format!(
+                "model {} does not support keyword spotting",
+                model.id()
+            )));
+        }
         let directory = model_directory.into();
         let keywords = keywords
             .into_iter()
@@ -70,11 +102,13 @@ impl SherpaWakeWordDetector {
         }
         let path = |relative: &str| directory.join(relative).to_string_lossy().into_owned();
         let mut config = KeywordSpotterConfig::default();
-        config.model_config.transducer.encoder = Some(path("am-onnx/encoder.int8.onnx"));
-        config.model_config.transducer.decoder = Some(path("am-onnx/decoder.int8.onnx"));
-        config.model_config.transducer.joiner = Some(path("am-onnx/joiner.int8.onnx"));
-        config.model_config.tokens = Some(path("lang/tokens.txt"));
+        let (encoder, decoder, joiner, tokens) = model.inference_files();
+        config.model_config.transducer.encoder = Some(path(encoder));
+        config.model_config.transducer.decoder = Some(path(decoder));
+        config.model_config.transducer.joiner = Some(path(joiner));
+        config.model_config.tokens = Some(path(tokens));
         config.model_config.num_threads = threads.max(1);
+        config.model_config.model_type = Some("zipformer2".into());
         config.keywords_buf = Some(keywords);
         config.keywords_score = score;
         config.keywords_threshold = threshold;

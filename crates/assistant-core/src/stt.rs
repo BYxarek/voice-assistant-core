@@ -8,12 +8,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
+use sherpa_onnx::{
+    OfflineRecognizer, OfflineRecognizerConfig, OnlineRecognizer, OnlineRecognizerConfig,
+    OnlineStream,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     domain::{CoreError, SpeechRecognizer, Transcript, TranscriptionRequest},
     metrics::CoreMetrics,
+    models::{ModelSpec, RecognitionMode, model_spec},
 };
 
 enum RecognitionJob {
@@ -38,6 +42,7 @@ enum RecognitionJob {
 pub struct SherpaOnnxRecognizer {
     jobs: Arc<RwLock<mpsc::Sender<RecognitionJob>>>,
     model_directory: PathBuf,
+    model: ModelSpec,
     threads: i32,
     queue_capacity: usize,
     metrics: CoreMetrics,
@@ -55,8 +60,27 @@ impl SherpaOnnxRecognizer {
         queue_capacity: usize,
         metrics: CoreMetrics,
     ) -> Result<Self, CoreError> {
-        Self::new_supervised_with_control(
+        Self::new_for_model(
             model_directory,
+            model_spec(crate::config::DEFAULT_MODEL_ID)
+                .map_err(|error| CoreError::Recognition(error.to_string()))?,
+            threads,
+            queue_capacity,
+            metrics,
+        )
+    }
+
+    /// Starts a worker for an explicit pinned catalog model.
+    pub fn new_for_model(
+        model_directory: impl Into<PathBuf>,
+        model: ModelSpec,
+        threads: i32,
+        queue_capacity: usize,
+        metrics: CoreMetrics,
+    ) -> Result<Self, CoreError> {
+        Self::new_supervised_for_model_with_control(
+            model_directory,
+            model,
             threads,
             queue_capacity,
             metrics,
@@ -100,11 +124,40 @@ impl SherpaOnnxRecognizer {
         cancelled: Arc<AtomicBool>,
         progress: impl FnMut(u8, &'static str) + Send + 'static,
     ) -> Result<Self, CoreError> {
+        let model = model_spec(crate::config::DEFAULT_MODEL_ID)
+            .map_err(|error| CoreError::Recognition(error.to_string()))?;
+        Self::new_supervised_for_model_with_control(
+            model_directory,
+            model,
+            threads,
+            queue_capacity,
+            metrics,
+            max_restarts,
+            restart_backoff,
+            cancelled,
+            progress,
+        )
+    }
+
+    /// Loads and supervises an explicit pinned online or offline catalog model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_supervised_for_model_with_control(
+        model_directory: impl Into<PathBuf>,
+        model: ModelSpec,
+        threads: i32,
+        queue_capacity: usize,
+        metrics: CoreMetrics,
+        max_restarts: u32,
+        restart_backoff: Duration,
+        cancelled: Arc<AtomicBool>,
+        progress: impl FnMut(u8, &'static str) + Send + 'static,
+    ) -> Result<Self, CoreError> {
         let model_directory = model_directory.into();
-        validate_model(&model_directory, queue_capacity)?;
+        validate_model(&model_directory, model, queue_capacity)?;
         let threads = effective_threads(threads);
         let jobs = spawn_worker(
             model_directory.clone(),
+            model,
             threads,
             queue_capacity,
             metrics.clone(),
@@ -114,6 +167,7 @@ impl SherpaOnnxRecognizer {
         Ok(Self {
             jobs: Arc::new(RwLock::new(jobs)),
             model_directory,
+            model,
             threads,
             queue_capacity,
             metrics,
@@ -154,6 +208,9 @@ impl SpeechRecognizer for SherpaOnnxRecognizer {
             return Err(CoreError::Recognition(
                 "sample rate must be non-zero".into(),
             ));
+        }
+        if self.model.mode() == RecognitionMode::Offline {
+            return Ok(false);
         }
         let (response, result) = oneshot::channel();
         self.sender()
@@ -215,12 +272,14 @@ impl SpeechRecognizer for SherpaOnnxRecognizer {
         // bounded by `max_restarts`, and a process restart is the upgrade path for hard hangs.
         tokio::time::sleep(restart_delay(self.restart_backoff, restart)).await;
         let model_directory = self.model_directory.clone();
+        let model = self.model;
         let threads = self.threads;
         let queue_capacity = self.queue_capacity;
         let metrics = self.metrics.clone();
         let sender = tokio::task::spawn_blocking(move || {
             spawn_worker(
                 model_directory,
+                model,
                 threads,
                 queue_capacity,
                 metrics,
@@ -242,6 +301,7 @@ impl SpeechRecognizer for SherpaOnnxRecognizer {
 
 fn spawn_worker(
     model_directory: PathBuf,
+    model: ModelSpec,
     threads: i32,
     queue_capacity: usize,
     metrics: CoreMetrics,
@@ -259,7 +319,7 @@ fn spawn_worker(
                 return;
             }
             progress(50, "initializing STT engine");
-            let recognizer = create_recognizer(&model_directory, threads);
+            let recognizer = create_recognizer(&model_directory, model, threads);
             match recognizer {
                 Ok(recognizer) => {
                     progress(75, "warming STT engine");
@@ -287,7 +347,23 @@ fn spawn_worker(
     Ok(jobs)
 }
 
+enum NativeRecognizer {
+    Online(OnlineRecognizer),
+    Offline(OfflineRecognizer),
+}
+
 fn worker_loop(
+    recognizer: NativeRecognizer,
+    receiver: &mut mpsc::Receiver<RecognitionJob>,
+    metrics: CoreMetrics,
+) {
+    match recognizer {
+        NativeRecognizer::Online(recognizer) => online_worker_loop(recognizer, receiver, metrics),
+        NativeRecognizer::Offline(recognizer) => offline_worker_loop(recognizer, receiver, metrics),
+    }
+}
+
+fn online_worker_loop(
     recognizer: OnlineRecognizer,
     receiver: &mut mpsc::Receiver<RecognitionJob>,
     metrics: CoreMetrics,
@@ -330,13 +406,38 @@ fn worker_loop(
     }
 }
 
-fn validate_model(directory: &Path, queue_capacity: usize) -> Result<(), CoreError> {
-    for path in [
-        "am-onnx/encoder.int8.onnx",
-        "am-onnx/decoder.int8.onnx",
-        "am-onnx/joiner.int8.onnx",
-        "lang/tokens.txt",
-    ] {
+fn offline_worker_loop(
+    recognizer: OfflineRecognizer,
+    receiver: &mut mpsc::Receiver<RecognitionJob>,
+    metrics: CoreMetrics,
+) {
+    while let Some(job) = receiver.blocking_recv() {
+        match job {
+            RecognitionJob::Batch { request, response } => {
+                metrics.stt_dequeued();
+                let _ = response.send(recognize_offline(&recognizer, request));
+            }
+            RecognitionJob::Begin { response, .. } | RecognitionJob::Push { response, .. } => {
+                let _ = response.send(Err(CoreError::Recognition(
+                    "offline STT does not accept streaming jobs".into(),
+                )));
+            }
+            RecognitionJob::Finish { response } => {
+                metrics.stt_dequeued();
+                let _ = response.send(Err(CoreError::Recognition(
+                    "offline STT does not have an active stream".into(),
+                )));
+            }
+        }
+    }
+}
+
+fn validate_model(
+    directory: &Path,
+    model: ModelSpec,
+    queue_capacity: usize,
+) -> Result<(), CoreError> {
+    for path in model.files() {
         if !directory.join(path).is_file() {
             return Err(CoreError::Recognition(format!(
                 "model file is missing: {path}"
@@ -377,24 +478,76 @@ fn restart_delay(initial: Duration, attempt: u32) -> Duration {
     initial.saturating_mul(1_u32 << attempt.saturating_sub(1).min(10))
 }
 
-fn create_recognizer(directory: &Path, threads: i32) -> Result<OnlineRecognizer, String> {
+fn create_recognizer(
+    directory: &Path,
+    model: ModelSpec,
+    threads: i32,
+) -> Result<NativeRecognizer, String> {
     let path = |relative: &str| directory.join(relative).to_string_lossy().into_owned();
-    let mut config = OnlineRecognizerConfig::default();
-    config.model_config.transducer.encoder = Some(path("am-onnx/encoder.int8.onnx"));
-    config.model_config.transducer.decoder = Some(path("am-onnx/decoder.int8.onnx"));
-    config.model_config.transducer.joiner = Some(path("am-onnx/joiner.int8.onnx"));
-    config.model_config.tokens = Some(path("lang/tokens.txt"));
-    config.model_config.num_threads = threads.max(1);
-    config.enable_endpoint = true;
-    config.decoding_method = Some("greedy_search".into());
-    OnlineRecognizer::create(&config).ok_or_else(|| "sherpa-onnx initialization failed".into())
+    let (encoder, decoder, joiner, tokens) = model.inference_files();
+    match model.mode() {
+        RecognitionMode::Online => {
+            let mut config = OnlineRecognizerConfig::default();
+            config.model_config.transducer.encoder = Some(path(encoder));
+            config.model_config.transducer.decoder = Some(path(decoder));
+            config.model_config.transducer.joiner = Some(path(joiner));
+            config.model_config.tokens = Some(path(tokens));
+            config.model_config.num_threads = threads.max(1);
+            config.model_config.model_type = Some("zipformer2".into());
+            config.enable_endpoint = true;
+            config.decoding_method = Some("greedy_search".into());
+            OnlineRecognizer::create(&config)
+                .map(NativeRecognizer::Online)
+                .ok_or_else(|| "sherpa-onnx online initialization failed".into())
+        }
+        RecognitionMode::Offline => {
+            let mut config = OfflineRecognizerConfig::default();
+            config.model_config.transducer.encoder = Some(path(encoder));
+            config.model_config.transducer.decoder = Some(path(decoder));
+            config.model_config.transducer.joiner = Some(path(joiner));
+            config.model_config.tokens = Some(path(tokens));
+            config.model_config.num_threads = threads.max(1);
+            config.model_config.model_type = Some("zipformer2".into());
+            config.decoding_method = Some("greedy_search".into());
+            OfflineRecognizer::create(&config)
+                .map(NativeRecognizer::Offline)
+                .ok_or_else(|| "sherpa-onnx offline initialization failed".into())
+        }
+    }
 }
 
-fn warm_up(recognizer: &OnlineRecognizer) {
+fn warm_up(recognizer: &NativeRecognizer) {
+    match recognizer {
+        NativeRecognizer::Online(recognizer) => {
+            let stream = recognizer.create_stream();
+            stream.accept_waveform(16_000, &[0.0; 1_600]);
+            stream.input_finished();
+            decode_ready(recognizer, &stream);
+        }
+        NativeRecognizer::Offline(recognizer) => {
+            let stream = recognizer.create_stream();
+            stream.accept_waveform(16_000, &[0.0; 1_600]);
+            recognizer.decode(&stream);
+        }
+    }
+}
+
+fn recognize_offline(
+    recognizer: &OfflineRecognizer,
+    request: TranscriptionRequest,
+) -> Result<Transcript, CoreError> {
+    let sample_rate = i32::try_from(request.sample_rate)
+        .map_err(|_| CoreError::Recognition("sample rate is too large".into()))?;
     let stream = recognizer.create_stream();
-    stream.accept_waveform(16_000, &[0.0; 1_600]);
-    stream.input_finished();
-    decode_ready(recognizer, &stream);
+    stream.accept_waveform(sample_rate, &request.samples);
+    recognizer.decode(&stream);
+    let result = stream
+        .get_result()
+        .ok_or_else(|| CoreError::Recognition("sherpa-onnx returned no result".into()))?;
+    Ok(Transcript {
+        text: result.text,
+        confidence: None,
+    })
 }
 
 fn recognize(

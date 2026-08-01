@@ -9,7 +9,7 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.2.0**. Публичный Rust extension API v3 и IPC
+Текущий стабильный релиз — **1.3.0**. Публичный Rust extension API v3 и IPC
 protocol v4. Форматы аудио, очереди и
 inference изолированы от GUI.
 
@@ -70,6 +70,7 @@ Rust и Cargo для готового релиза не требуются. Дл
 ```powershell
 cargo run -p assistant-cli -- validate-config
 cargo run -p assistant-cli -- devices
+cargo run -p assistant-cli -- models list
 cargo run -p assistant-cli -- models install
 cargo run -p assistant-daemon
 ```
@@ -205,10 +206,12 @@ threads/queue. Файл заменяется атомарно, параметр�
 
 ```toml
 [wake_word]
+model = "alphacep/vosk-model-streaming-ru"
 keyword = "ассистент"
 aliases = ["помощник"]
 
 [inference]
+model = "alphacep/vosk-model-streaming-ru"
 threads = 0 # автоматически по available_parallelism
 max_restarts = 3
 restart_backoff_ms = 500
@@ -248,12 +251,23 @@ confirmation_timeout_ms = 15000
 
 ## Модели
 
-Production-модель:
-[`alphacep/vosk-model-streaming-ru`](https://huggingface.co/alphacep/vosk-model-streaming-ru),
-revision `83bbf6f40059480e96251be8aed3d32bc7c80c33`, Apache-2.0.
+Встроенный каталог содержит семь pinned STT-моделей организации
+[`alphacep`](https://huggingface.co/alphacep/models): русские, бенгальскую,
+таджикскую и узбекскую, в online и offline вариантах. Полный список:
+
+```powershell
+cargo run -p assistant-cli -- models list
+cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
+```
+
+`inference.model` выбирает STT, а `wake_word.model` — отдельную online-модель
+KWS с `lang/bpe.model`. Offline-модели и модели без SentencePiece доступны для
+STT, но намеренно отклоняются как wake-word модель. Смена модели через
+`ApplyConfig` требует перезапуска daemon; IPC `InstallModel` устанавливает обе
+выбранные модели.
 
 ```text
-models\stt-ru-streaming\<revision>\
+models\<repo-name>\<revision>\
 ├── manifest.toml
 ├── am-onnx\
 └── lang\
@@ -283,10 +297,15 @@ callback, reconnect, потерями bounded-очереди и метрикам
 
 ```powershell
 $env:VOICE_ASSISTANT_TEST_WAV = "C:\fixtures\assistant-open-notepad.wav"
-$env:VOICE_ASSISTANT_TEST_MODEL = "$env:LOCALAPPDATA\VoiceAssistantCore\models\stt-ru-streaming\83bbf6f40059480e96251be8aed3d32bc7c80c33"
+$env:VOICE_ASSISTANT_TEST_MODEL = "$env:LOCALAPPDATA\VoiceAssistantCore\models\vosk-model-streaming-ru\83bbf6f40059480e96251be8aed3d32bc7c80c33"
 $env:VOICE_ASSISTANT_TEST_TRANSCRIPT = "ассистент открой блокнот"
 cargo test -p assistant-core --all-features --test real_audio -- --ignored
 ```
+
+Для проверки любой online/offline модели каталога отдельно задайте
+`VOICE_ASSISTANT_TEST_STT_WAV`, `VOICE_ASSISTANT_TEST_STT_MODEL`,
+`VOICE_ASSISTANT_TEST_STT_MODEL_ID` и `VOICE_ASSISTANT_TEST_STT_TRANSCRIPT`, затем
+запустите ignored-тест `fixed_real_wav_transcribes_with_selected_catalog_model`.
 
 Файл должен быть неизменным mono WAV; ожидаемый transcript фиксируется
 переменной окружения.

@@ -1,4 +1,4 @@
-schema_version = 3
+schema_version = 4
 
 [audio]
 # Non-empty backend device ID, or "default" for the system input device.
@@ -19,6 +19,7 @@ stall_timeout_ms = 3000
 normalize_yo = true
 
 [wake_word]
+model = "alphacep/vosk-model-streaming-ru"
 keyword = "ассистент"
 aliases = ["помощник"]
 score = 1.5
@@ -26,6 +27,7 @@ threshold = 0.35
 cooldown_ms = 1200
 
 [inference]
+model = "alphacep/vosk-model-streaming-ru"
 # 0 selects the available host parallelism automatically.
 threads = 0
 queue_capacity = 2

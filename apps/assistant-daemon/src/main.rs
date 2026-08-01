@@ -23,9 +23,7 @@ use assistant_core::{
         CoreRequest, CoreResponse, IpcErrorCode,
         windows::{RequestHandler, serve_named_pipe},
     },
-    models::{
-        ALPHACEP_STREAMING_RU_FILES, ALPHACEP_STREAMING_RU_REVISION, ModelError, ModelManager,
-    },
+    models::{ModelError, ModelInstallProgress, ModelManager, model_spec},
     signal::{CommandAudioPipeline, EnergyVad, rms},
     spawn_runtime_service,
     stt::SherpaOnnxRecognizer,
@@ -47,7 +45,7 @@ struct Args {
 #[derive(Clone)]
 struct AudioSettings {
     config: Arc<CoreConfig>,
-    model: Option<PathBuf>,
+    wake_model: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -69,6 +67,7 @@ struct DaemonContext {
     stt_loading: Arc<AtomicBool>,
     apply_lock: Arc<tokio::sync::Mutex<()>>,
     audio_settings: Arc<RwLock<AudioSettings>>,
+    stt_model: Arc<RwLock<Option<PathBuf>>>,
     audio_generation: Arc<AtomicU64>,
     audio_ready: Arc<AtomicBool>,
     audio_faulted: Arc<AtomicBool>,
@@ -177,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     let audio_faulted = Arc::new(AtomicBool::new(false));
     let audio_settings = Arc::new(RwLock::new(AudioSettings {
         config: Arc::clone(&config),
-        model: None,
+        wake_model: None,
     }));
     let audio_generation = Arc::new(AtomicU64::new(0));
     let manual_capture = Arc::new(AtomicU8::new(MANUAL_CAPTURE_IDLE));
@@ -194,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
         stt_loading: Arc::new(AtomicBool::new(false)),
         apply_lock: Arc::new(tokio::sync::Mutex::new(())),
         audio_settings: Arc::clone(&audio_settings),
+        stt_model: Arc::new(RwLock::new(None)),
         audio_generation: Arc::clone(&audio_generation),
         audio_ready: Arc::clone(&audio_ready),
         audio_faulted: Arc::clone(&audio_faulted),
@@ -604,7 +604,16 @@ async fn apply_config(
             "IPC pipe name and timeout require daemon restart".into(),
         ));
     }
+    if config.inference.model != old.inference.model
+        || config.wake_word.model != old.wake_word.model
+    {
+        return Err((
+            IpcErrorCode::Configuration,
+            "model selection requires daemon restart".into(),
+        ));
+    }
     let model = current_model_path(context);
+    let wake_model = current_wake_model_path(context);
     let model_ready = model.is_some();
     let replace_stt = inference_worker_changed(&old, &config);
     let recognizer = if replace_stt {
@@ -653,7 +662,7 @@ async fn apply_config(
         .map_err(|_| (IpcErrorCode::Internal, "config lock poisoned".into()))? =
         Arc::clone(&config);
     let restart_audio = old.audio != config.audio || old.wake_word != config.wake_word;
-    update_audio_settings(context, config, model, restart_audio);
+    update_audio_settings(context, config, wake_model, restart_audio);
     if replace_stt && model_ready {
         set_model_ready(context);
     }
@@ -664,12 +673,21 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
     if context.model_installing.swap(true, Ordering::AcqRel) {
         return Err("model installation is already running".into());
     }
+    let config = current_config(&context)?;
+    let stt_spec = model_spec(&config.inference.model).map_err(|error| error.to_string())?;
+    let wake_spec = model_spec(&config.wake_word.model).map_err(|error| error.to_string())?;
+    let total_files = stt_spec.files().len()
+        + if stt_spec.id() != wake_spec.id() {
+            wake_spec.files().len()
+        } else {
+            0
+        };
     context.model_cancel.store(false, Ordering::Release);
     set_model_status(
         &context,
         ModelStatus::Installing {
             completed_files: 0,
-            total_files: ALPHACEP_STREAMING_RU_FILES.len(),
+            total_files,
             file: None,
         },
     );
@@ -678,7 +696,7 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
         let manager = context.model_manager.clone();
         let cancelled = Arc::clone(&context.model_cancel);
         let result = tokio::task::spawn_blocking(move || {
-            manager.install_alphacep_streaming_ru_with_control(&cancelled, |progress| {
+            install_configured_models(&manager, &config, &cancelled, |progress| {
                 let status = ModelStatus::Installing {
                     completed_files: progress.completed_files,
                     total_files: progress.total_files,
@@ -696,8 +714,8 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
         })
         .await;
         match result {
-            Ok(Ok(path)) => {
-                if let Err(error) = activate_model(&context, path).await {
+            Ok(Ok((stt_path, wake_path))) => {
+                if let Err(error) = activate_model(&context, stt_path, wake_path).await {
                     if context.stt_cancel.load(Ordering::Acquire) {
                         set_model_status(&context, ModelStatus::Cancelled);
                     } else {
@@ -737,10 +755,53 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
     Ok(())
 }
 
+fn install_configured_models(
+    manager: &ModelManager,
+    config: &CoreConfig,
+    cancelled: &AtomicBool,
+    mut progress: impl FnMut(ModelInstallProgress),
+) -> Result<(PathBuf, PathBuf), ModelError> {
+    let stt_spec = model_spec(&config.inference.model)?;
+    let wake_spec = model_spec(&config.wake_word.model)?;
+    let total = stt_spec.files().len()
+        + if stt_spec.id() != wake_spec.id() {
+            wake_spec.files().len()
+        } else {
+            0
+        };
+    let stt = manager.install_with_control(stt_spec.id(), cancelled, |item| {
+        progress(ModelInstallProgress {
+            total_files: total,
+            ..item
+        });
+    })?;
+    if stt_spec.id() == wake_spec.id() {
+        return Ok((stt.clone(), stt));
+    }
+    let offset = stt_spec.files().len();
+    let wake = manager.install_with_control(wake_spec.id(), cancelled, |item| {
+        progress(ModelInstallProgress {
+            completed_files: offset + item.completed_files,
+            total_files: total,
+            file: item.file,
+        });
+    })?;
+    Ok((stt, wake))
+}
+
 async fn initialize_stt(context: DaemonContext) {
-    match resolve_model(&context).await {
-        Ok(path) => {
-            if let Err(error) = activate_model(&context, path).await
+    let config = current_config(&context);
+    let resolved = match config {
+        Ok(config) => {
+            let stt = resolve_model(&context, config.inference.model.clone()).await;
+            let wake = resolve_model(&context, config.wake_word.model.clone()).await;
+            stt.and_then(|stt| wake.map(|wake| (stt, wake)))
+        }
+        Err(error) => Err(error),
+    };
+    match resolved {
+        Ok((stt_path, wake_path)) => {
+            if let Err(error) = activate_model(&context, stt_path, wake_path).await
                 && !context.stopping.load(Ordering::Acquire)
             {
                 if context.stt_cancel.load(Ordering::Acquire) {
@@ -767,13 +828,13 @@ async fn initialize_stt(context: DaemonContext) {
     }
 }
 
-async fn resolve_model(context: &DaemonContext) -> Result<PathBuf, String> {
+async fn resolve_model(context: &DaemonContext, model_id: String) -> Result<PathBuf, String> {
     let manager = context.model_manager.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("assistant-model-resolve".into())
         .spawn(move || {
-            let _ = sender.send(manager.resolve_alphacep_streaming_ru());
+            let _ = sender.send(manager.resolve(&model_id));
         })
         .map_err(|error| error.to_string())?;
     receiver
@@ -801,12 +862,14 @@ async fn load_stt_recognizer(
     let queue_capacity = config.inference.queue_capacity;
     let max_restarts = config.inference.max_restarts;
     let restart_backoff = Duration::from_millis(config.inference.restart_backoff_ms);
+    let model = model_spec(&config.inference.model).map_err(|error| error.to_string())?;
     let worker = std::thread::Builder::new()
         .name("assistant-stt-loader".into())
         .spawn(move || {
             let progress_context = worker_context.clone();
-            let result = SherpaOnnxRecognizer::new_supervised_with_control(
+            let result = SherpaOnnxRecognizer::new_supervised_for_model_with_control(
                 path,
+                model,
                 threads,
                 queue_capacity,
                 metrics,
@@ -833,7 +896,7 @@ async fn load_stt_recognizer(
         set_model_status(
             context,
             ModelStatus::Ready {
-                revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+                revision: model.revision().into(),
             },
         );
     }
@@ -857,7 +920,11 @@ fn set_stt_load_progress(context: &DaemonContext, progress: u8, stage: &str, act
         });
 }
 
-async fn activate_model(context: &DaemonContext, path: PathBuf) -> Result<(), String> {
+async fn activate_model(
+    context: &DaemonContext,
+    stt_path: PathBuf,
+    wake_path: PathBuf,
+) -> Result<(), String> {
     let _guard = context.apply_lock.lock().await;
     let config = current_config(context)?;
     while !matches!(
@@ -871,7 +938,7 @@ async fn activate_model(context: &DaemonContext, path: PathBuf) -> Result<(), St
     }
     let recognizer = load_stt_recognizer(
         context,
-        path.clone(),
+        stt_path.clone(),
         &config,
         current_model_path(context).is_some(),
     )
@@ -884,19 +951,20 @@ async fn activate_model(context: &DaemonContext, path: PathBuf) -> Result<(), St
         })
         .await
         .map_err(|error| error.to_string())?;
-    update_audio_settings(context, config, Some(path), true);
+    if let Ok(mut current) = context.stt_model.write() {
+        *current = Some(stt_path);
+    }
+    update_audio_settings(context, config, Some(wake_path), true);
     set_model_ready(context);
     Ok(())
 }
 
 async fn verify_model(context: &DaemonContext) -> Result<ModelStatus, String> {
-    match resolve_model(context).await {
-        Ok(path) => {
-            activate_model(context, path).await?;
-            Ok(current_model_status(context))
-        }
-        Err(error) => Err(error),
-    }
+    let config = current_config(context)?;
+    let stt = resolve_model(context, config.inference.model.clone()).await?;
+    let wake = resolve_model(context, config.wake_word.model.clone()).await?;
+    activate_model(context, stt, wake).await?;
+    Ok(current_model_status(context))
 }
 
 fn build_runtime_components_without_stt(
@@ -955,7 +1023,8 @@ fn build_runtime_update(
 }
 
 fn inference_worker_changed(old: &CoreConfig, new: &CoreConfig) -> bool {
-    old.inference.threads != new.inference.threads
+    old.inference.model != new.inference.model
+        || old.inference.threads != new.inference.threads
         || old.inference.queue_capacity != new.inference.queue_capacity
         || old.inference.max_restarts != new.inference.max_restarts
         || old.inference.restart_backoff_ms != new.inference.restart_backoff_ms
@@ -964,7 +1033,18 @@ fn inference_worker_changed(old: &CoreConfig, new: &CoreConfig) -> bool {
 fn validate_stock_config(config: &CoreConfig) -> Result<(), assistant_core::config::ConfigError> {
     let handlers = builtin_handlers(&config.commands)
         .map_err(|error| assistant_core::config::ConfigError::Validation(error.to_string()))?;
-    config.validate_with_handlers(&handlers)
+    config.validate_with_handlers(&handlers)?;
+    model_spec(&config.inference.model)
+        .map_err(|error| assistant_core::config::ConfigError::Validation(error.to_string()))?;
+    let wake_model = model_spec(&config.wake_word.model)
+        .map_err(|error| assistant_core::config::ConfigError::Validation(error.to_string()))?;
+    if !wake_model.supports_wake_word() {
+        return Err(assistant_core::config::ConfigError::Validation(format!(
+            "model {} cannot be used for wake-word detection",
+            wake_model.id()
+        )));
+    }
+    Ok(())
 }
 
 fn health(context: &DaemonContext) -> HealthSnapshot {
@@ -1075,10 +1155,18 @@ fn current_model_status(context: &DaemonContext) -> ModelStatus {
 
 fn current_model_path(context: &DaemonContext) -> Option<PathBuf> {
     context
+        .stt_model
+        .read()
+        .ok()
+        .and_then(|model| model.clone())
+}
+
+fn current_wake_model_path(context: &DaemonContext) -> Option<PathBuf> {
+    context
         .audio_settings
         .read()
         .ok()
-        .and_then(|settings| settings.model.clone())
+        .and_then(|settings| settings.wake_model.clone())
 }
 
 fn set_model_status(context: &DaemonContext, status: ModelStatus) {
@@ -1088,26 +1176,27 @@ fn set_model_status(context: &DaemonContext, status: ModelStatus) {
 }
 
 fn set_model_ready(context: &DaemonContext) {
+    let revision = current_config(context)
+        .ok()
+        .and_then(|config| model_spec(&config.inference.model).ok())
+        .map(|model| model.revision())
+        .unwrap_or("unknown")
+        .to_owned();
     set_model_status(
         context,
         ModelStatus::Ready {
-            revision: ALPHACEP_STREAMING_RU_REVISION.into(),
+            revision: revision.clone(),
         },
     );
-    context.runtime.publish_event(AssistantEvent::ModelReady {
-        revision: ALPHACEP_STREAMING_RU_REVISION.into(),
-    });
+    context
+        .runtime
+        .publish_event(AssistantEvent::ModelReady { revision });
     set_last_error(context, None);
 }
 
 fn restore_ready_status(context: &DaemonContext, ready: bool) {
     if ready {
-        set_model_status(
-            context,
-            ModelStatus::Ready {
-                revision: ALPHACEP_STREAMING_RU_REVISION.into(),
-            },
-        );
+        set_model_ready(context);
     }
 }
 
@@ -1145,7 +1234,10 @@ fn update_audio_settings(
     restart: bool,
 ) {
     if let Ok(mut settings) = context.audio_settings.write() {
-        *settings = AudioSettings { config, model };
+        *settings = AudioSettings {
+            config,
+            wake_model: model,
+        };
         if restart {
             context.audio_generation.fetch_add(1, Ordering::AcqRel);
         }
@@ -1196,13 +1288,23 @@ fn audio_loop(
             .read()
             .map_err(|_| "audio settings lock poisoned".to_string())?
             .clone();
-        let Some(model) = current.model else {
+        let Some(model) = current.wake_model else {
             ready.store(false, Ordering::Release);
             std::thread::sleep(Duration::from_millis(200));
             continue;
         };
-        let mut detector = match SherpaWakeWordDetector::new_with_aliases(
+        let wake_model = match model_spec(&current.config.wake_word.model) {
+            Ok(model) => model,
+            Err(error) => {
+                faulted.store(true, Ordering::Release);
+                tracing::error!(%error, "invalid wake-word model");
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        };
+        let mut detector = match SherpaWakeWordDetector::new_for_model_with_aliases(
             model,
+            wake_model,
             std::iter::once(current.config.wake_word.keyword.as_str())
                 .chain(current.config.wake_word.aliases.iter().map(String::as_str)),
             current.config.wake_word.score,

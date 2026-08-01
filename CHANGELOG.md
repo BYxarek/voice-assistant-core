@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0] — 2026-08-01
+
+### Добавлено
+
+- pinned-каталог семи STT-моделей `alphacep/vosk-model*` с языком, режимом и
+  точными allowlist-путями ONNX-файлов;
+- online/offline sherpa-onnx worker за общим `SpeechRecognizer`;
+- команды `models list` и `models install [model-id]`;
+- отдельный выбор STT и совместимой wake-word модели.
+
+### Изменено
+
+- `ModelManager` устанавливает и проверяет любую модель встроенного каталога;
+- версия конфигурации увеличена до schema v4; schema 1–3 мигрируются
+  автоматически;
+- старый каталог установленной stock-модели продолжает разрешаться без
+  повторной загрузки.
+
 ## [1.2.0] — 2026-07-31
 
 ### Добавлено
@@ -75,3 +93,4 @@
 [1.1.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.0
 [1.1.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.1
 [1.2.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.2.0
+[1.3.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.3.0

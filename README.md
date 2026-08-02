@@ -9,8 +9,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.3.0**. Публичный Rust extension API v3 и IPC
-protocol v4. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.4.0**. Публичный Rust extension API v4 и IPC
+protocol v5. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -100,10 +100,10 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Публичный Rust API v3
+## Публичный Rust API v4
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
-`CORE_API_VERSION` равен `3`. В v3 входят:
+`CORE_API_VERSION` равен `4`. В v4 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
@@ -114,7 +114,7 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v4; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v5; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -157,7 +157,7 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v4
+## IPC protocol v5
 
 Pipe по умолчанию: `\\.\pipe\voice-assistant-core`. Сервер допускает только
 локальных клиентов, защищён DACL и разрешает один daemon на pipe. Каждый JSON
@@ -233,6 +233,42 @@ timeout_ms = 10000
 executable = "notepad.exe"
 ```
 
+Штатный daemon также регистрирует `open_url { url }`, `set_volume { level }` и
+`click_mouse { x, y, duration_ms? }`. URL ограничен схемами `http`/`https`, уровень
+громкости — целым числом `0..100`. `click_mouse` требует `risk = "high"`; курсор
+перемещается к координатам плавно за 350 мс по умолчанию или за заданные
+`100..10000` мс.
+
+Одна команда может содержать до 32 последовательных `actions`. `delay_ms` задаёт
+задержку перед шагом (не более 60000 мс), а `timeout_ms` ограничивает всю
+последовательность:
+
+```toml
+[[commands]]
+id = "open_site_and_set_volume"
+enabled = true
+phrases = ["открой сайт"]
+risk = "low"
+timeout_ms = 15000
+
+[[commands.actions]]
+handler = "open_url"
+
+[commands.actions.parameters]
+url = "https://example.com"
+
+[[commands.actions]]
+handler = "set_volume"
+delay_ms = 500
+
+[commands.actions.parameters]
+level = "35"
+```
+
+`handler`/`parameters` и `actions` взаимоисключающие. Все значения фиксируются в
+конфигурации и проверяются через allowlist; распознанный текст не становится
+URL, координатой или уровнем громкости.
+
 Распознанный текст никогда не исполняется как `cmd.exe` или PowerShell.
 Обработчик получает только проверенный `CommandConfig`. Для команд с
 подтверждением событие содержит одноразовый `confirmation_id`; именно его надо
@@ -263,7 +299,7 @@ cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
 Пример: offline STT и отдельная streaming-модель для wake word:
 
 ```toml
-schema_version = 4
+schema_version = 5
 
 [inference]
 model = "alphacep/vosk-model-small-ru"

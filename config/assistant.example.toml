@@ -1,4 +1,4 @@
-schema_version = 4
+schema_version = 5
 
 [audio]
 # Non-empty backend device ID, or "default" for the system input device.
@@ -56,3 +56,35 @@ timeout_ms = 10000
 
 [commands.parameters]
 executable = "notepad.exe"
+
+# Disabled example of an ordered command. delay_ms is applied before its action.
+# click_mouse always requires risk = "high" and moves the cursor smoothly.
+[[commands]]
+id = "browser_demo"
+enabled = false
+phrases = ["открой пример сайта"]
+risk = "high"
+requires_confirmation = true
+timeout_ms = 15000
+
+[[commands.actions]]
+handler = "open_url"
+
+[commands.actions.parameters]
+url = "https://example.com"
+
+[[commands.actions]]
+handler = "set_volume"
+delay_ms = 500
+
+[commands.actions.parameters]
+level = "35"
+
+[[commands.actions]]
+handler = "click_mouse"
+delay_ms = 1000
+
+[commands.actions.parameters]
+x = "800"
+y = "450"
+duration_ms = "500"

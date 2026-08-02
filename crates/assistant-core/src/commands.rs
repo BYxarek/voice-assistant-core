@@ -1,7 +1,8 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     process::Command,
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -157,6 +158,11 @@ pub trait CommandHandler: Send + Sync {
     /// Declares the stable name and parameter allowlist.
     fn schema(&self) -> HandlerSchema;
 
+    /// Validates both the schema and handler-specific parameter values.
+    fn validate_parameters(&self, parameters: &CommandParameters) -> Result<(), CoreError> {
+        self.schema().validate(parameters)
+    }
+
     /// Executes already validated typed parameters.
     async fn execute(&self, parameters: &CommandParameters) -> Result<CommandResult, CoreError>;
 }
@@ -199,11 +205,22 @@ impl HandlerRegistry {
 
     /// Validates one command against the registered extension contract.
     pub fn validate_command(&self, command: &CommandConfig) -> Result<(), CoreError> {
-        let handler = self
-            .handlers
-            .get(&command.handler)
-            .ok_or_else(|| CoreError::Command(format!("unknown handler: {}", command.handler)))?;
-        handler.schema().validate(&command.parameters)
+        for action in command.resolved_actions() {
+            self.validate_action(&action.handler, &action.parameters)?;
+        }
+        Ok(())
+    }
+
+    /// Validates one action against its installed extension contract.
+    pub fn validate_action(
+        &self,
+        handler: &str,
+        parameters: &CommandParameters,
+    ) -> Result<(), CoreError> {
+        self.handlers
+            .get(handler)
+            .ok_or_else(|| CoreError::Command(format!("unknown handler: {handler}")))?
+            .validate_parameters(parameters)
     }
 
     /// Returns registered handler names for diagnostics.
@@ -234,14 +251,14 @@ impl CommandExecutor for HandlerRegistry {
             .handlers
             .get(handler)
             .ok_or_else(|| CoreError::Command(format!("unknown handler: {handler}")))?;
-        handler.schema().validate(parameters)?;
+        handler.validate_parameters(parameters)?;
         handler.execute(parameters).await
     }
 }
 
 /// Legacy built-in executor for configured application allowlist entries.
 pub struct LaunchAppExecutor {
-    allowlist: HashMap<String, String>,
+    allowlist: ParameterAllowlist,
 }
 
 /// Built-in `launch_app` extension restricted to configured command IDs.
@@ -265,26 +282,129 @@ impl CommandHandler for LaunchAppHandler {
     }
 }
 
+/// Built-in `open_url` extension restricted to configured HTTP(S) URLs.
+pub struct OpenUrlHandler {
+    allowlist: ParameterAllowlist,
+}
+
+impl OpenUrlHandler {
+    /// Builds the URL allowlist from validated commands.
+    pub fn from_commands(commands: &[CommandConfig]) -> Self {
+        Self {
+            allowlist: parameter_allowlist(commands, "open_url"),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for OpenUrlHandler {
+    fn schema(&self) -> HandlerSchema {
+        HandlerSchema::new("open_url", ["url"], std::iter::empty::<&str>())
+    }
+
+    fn validate_parameters(&self, parameters: &CommandParameters) -> Result<(), CoreError> {
+        self.schema().validate(parameters)?;
+        validate_url(parameter(parameters, "url")?)
+    }
+
+    async fn execute(&self, parameters: &CommandParameters) -> Result<CommandResult, CoreError> {
+        require_allowlisted(&self.allowlist, parameters)?;
+        let url = parameter(parameters, "url")?.to_owned();
+        tokio::task::spawn_blocking(move || open_url(&url))
+            .await
+            .map_err(|error| CoreError::Command(format!("open_url worker failed: {error}")))??;
+        Ok(CommandResult {
+            message: "opened URL".into(),
+        })
+    }
+}
+
+/// Built-in `set_volume` extension for the default Windows render endpoint.
+pub struct SetVolumeHandler {
+    allowlist: ParameterAllowlist,
+}
+
+impl SetVolumeHandler {
+    /// Builds the level allowlist from validated commands.
+    pub fn from_commands(commands: &[CommandConfig]) -> Self {
+        Self {
+            allowlist: parameter_allowlist(commands, "set_volume"),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for SetVolumeHandler {
+    fn schema(&self) -> HandlerSchema {
+        HandlerSchema::new("set_volume", ["level"], std::iter::empty::<&str>())
+    }
+
+    fn validate_parameters(&self, parameters: &CommandParameters) -> Result<(), CoreError> {
+        self.schema().validate(parameters)?;
+        parse_volume(parameters).map(|_| ())
+    }
+
+    async fn execute(&self, parameters: &CommandParameters) -> Result<CommandResult, CoreError> {
+        require_allowlisted(&self.allowlist, parameters)?;
+        let level = parse_volume(parameters)?;
+        set_volume(level)?;
+        Ok(CommandResult {
+            message: format!("volume set to {level}"),
+        })
+    }
+}
+
+/// Built-in high-risk mouse click with bounded smooth cursor movement.
+pub struct ClickMouseHandler {
+    allowlist: ParameterAllowlist,
+}
+
+impl ClickMouseHandler {
+    /// Builds the click allowlist from validated commands.
+    pub fn from_commands(commands: &[CommandConfig]) -> Self {
+        Self {
+            allowlist: parameter_allowlist(commands, "click_mouse"),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandHandler for ClickMouseHandler {
+    fn schema(&self) -> HandlerSchema {
+        HandlerSchema::new("click_mouse", ["x", "y"], ["duration_ms"])
+    }
+
+    fn validate_parameters(&self, parameters: &CommandParameters) -> Result<(), CoreError> {
+        self.schema().validate(parameters)?;
+        parse_click(parameters).map(|_| ())
+    }
+
+    async fn execute(&self, parameters: &CommandParameters) -> Result<CommandResult, CoreError> {
+        require_allowlisted(&self.allowlist, parameters)?;
+        let (x, y, duration_ms) = parse_click(parameters)?;
+        click_mouse(x, y, duration_ms).await?;
+        Ok(CommandResult {
+            message: format!("clicked at {x},{y}"),
+        })
+    }
+}
+
 /// Creates the built-in handler set used by the stock daemon.
 pub fn builtin_handlers(commands: &[CommandConfig]) -> Result<HandlerRegistry, CoreError> {
     let mut handlers = HandlerRegistry::new();
     handlers.register(Arc::new(LaunchAppHandler::from_commands(commands)))?;
+    handlers.register(Arc::new(OpenUrlHandler::from_commands(commands)))?;
+    handlers.register(Arc::new(SetVolumeHandler::from_commands(commands)))?;
+    handlers.register(Arc::new(ClickMouseHandler::from_commands(commands)))?;
     Ok(handlers)
 }
 
 impl LaunchAppExecutor {
     /// Builds an executable allowlist from enabled `launch_app` commands.
     pub fn from_commands(commands: &[CommandConfig]) -> Self {
-        let allowlist = commands
-            .iter()
-            .filter(|c| c.enabled && c.handler == "launch_app")
-            .filter_map(|c| {
-                c.parameters
-                    .get("executable")
-                    .map(|path| (c.id.clone(), path.clone()))
-            })
-            .collect();
-        Self { allowlist }
+        Self {
+            allowlist: parameter_allowlist(commands, "launch_app"),
+        }
     }
 }
 
@@ -298,20 +418,219 @@ impl CommandExecutor for LaunchAppExecutor {
         if handler != "launch_app" {
             return Err(CoreError::Command("handler is not allowlisted".into()));
         }
-        let command_id = parameters
-            .get("_command_id")
-            .ok_or_else(|| CoreError::Command("missing command id".into()))?;
-        let executable = self
-            .allowlist
-            .get(command_id)
-            .ok_or_else(|| CoreError::Command("executable is not allowlisted".into()))?;
+        require_allowlisted(&self.allowlist, parameters)?;
+        let executable = parameter(parameters, "executable")?;
         Command::new(executable)
             .spawn()
             .map_err(|e| CoreError::Command(e.to_string()))?;
         Ok(CommandResult {
-            message: format!("launched {command_id}"),
+            message: format!("launched {}", parameters["_command_id"]),
         })
     }
+}
+
+type ParameterAllowlist = HashMap<String, Vec<CommandParameters>>;
+
+fn parameter_allowlist(commands: &[CommandConfig], handler: &str) -> ParameterAllowlist {
+    let mut allowlist = HashMap::<String, Vec<CommandParameters>>::new();
+    for command in commands.iter().filter(|command| command.enabled) {
+        for action in command.resolved_actions() {
+            if action.handler == handler {
+                allowlist
+                    .entry(command.id.clone())
+                    .or_default()
+                    .push(action.parameters);
+            }
+        }
+    }
+    allowlist
+}
+
+fn require_allowlisted(
+    allowlist: &ParameterAllowlist,
+    parameters: &CommandParameters,
+) -> Result<(), CoreError> {
+    let command_id = parameter(parameters, "_command_id")?;
+    let configured: BTreeMap<_, _> = parameters
+        .iter()
+        .filter(|(key, _)| !key.starts_with('_'))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if allowlist
+        .get(command_id)
+        .is_some_and(|entries| entries.contains(&configured))
+    {
+        Ok(())
+    } else {
+        Err(CoreError::Command("action is not allowlisted".into()))
+    }
+}
+
+fn parameter<'a>(parameters: &'a CommandParameters, name: &str) -> Result<&'a str, CoreError> {
+    parameters
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| CoreError::Command(format!("missing parameter: {name}")))
+}
+
+fn validate_url(url: &str) -> Result<(), CoreError> {
+    let (scheme, remainder) = url
+        .split_once("://")
+        .ok_or_else(|| CoreError::Command("url must use http or https".into()))?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || remainder.is_empty()
+        || url.chars().any(char::is_whitespace)
+    {
+        return Err(CoreError::Command(
+            "url must be a non-empty HTTP(S) URL without whitespace".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_volume(parameters: &CommandParameters) -> Result<u8, CoreError> {
+    parameter(parameters, "level")?
+        .parse::<u8>()
+        .ok()
+        .filter(|level| *level <= 100)
+        .ok_or_else(|| CoreError::Command("level must be an integer from 0 to 100".into()))
+}
+
+fn parse_click(parameters: &CommandParameters) -> Result<(i32, i32, u64), CoreError> {
+    let coordinate = |name| {
+        parameter(parameters, name)?
+            .parse::<i32>()
+            .map_err(|_| CoreError::Command(format!("{name} must be a 32-bit integer")))
+    };
+    let duration_ms = parameters
+        .get("duration_ms")
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| CoreError::Command("duration_ms must be an integer".into()))?
+        .unwrap_or(350);
+    if !(100..=10_000).contains(&duration_ms) {
+        return Err(CoreError::Command(
+            "duration_ms must be from 100 to 10000".into(),
+        ));
+    }
+    Ok((coordinate("x")?, coordinate("y")?, duration_ms))
+}
+
+#[cfg(windows)]
+fn open_url(url: &str) -> Result<(), CoreError> {
+    use windows::{
+        Win32::UI::{
+            Shell::{SEE_MASK_ASYNCOK, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
+            WindowsAndMessaging::SW_SHOWNORMAL,
+        },
+        core::PCWSTR,
+    };
+
+    let operation: Vec<u16> = "open\0".encode_utf16().collect();
+    let url: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_ASYNCOK | SEE_MASK_FLAG_NO_UI,
+        lpVerb: PCWSTR(operation.as_ptr()),
+        lpFile: PCWSTR(url.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: all pointers reference NUL-terminated UTF-16 for the duration of the call.
+    unsafe { ShellExecuteExW(&mut info) }
+        .map_err(|error| CoreError::Command(format!("cannot open URL: {error}")))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_url(_: &str) -> Result<(), CoreError> {
+    Err(CoreError::Unavailable("open_url requires Windows".into()))
+}
+
+#[cfg(windows)]
+fn set_volume(level: u8) -> Result<(), CoreError> {
+    use windows::Win32::{
+        Media::Audio::{
+            Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia,
+            eRender,
+        },
+        System::Com::{
+            CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+        },
+    };
+
+    struct ComGuard;
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with the successful CoInitializeEx call on this thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    // SAFETY: COM objects are created, used and released on this thread.
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .map_err(|error| CoreError::Command(format!("cannot initialize COM: {error}")))?;
+        let _guard = ComGuard;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|error| CoreError::Command(format!("cannot enumerate audio: {error}")))?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .map_err(|error| CoreError::Command(format!("cannot get audio endpoint: {error}")))?;
+        let volume: IAudioEndpointVolume = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|error| CoreError::Command(format!("cannot control volume: {error}")))?;
+        volume
+            .SetMasterVolumeLevelScalar(f32::from(level) / 100.0, std::ptr::null())
+            .map_err(|error| CoreError::Command(format!("cannot set volume: {error}")))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_volume(_: u8) -> Result<(), CoreError> {
+    Err(CoreError::Unavailable("set_volume requires Windows".into()))
+}
+
+#[cfg(windows)]
+async fn click_mouse(x: i32, y: i32, duration_ms: u64) -> Result<(), CoreError> {
+    use windows::Win32::{
+        Foundation::POINT,
+        UI::{
+            Input::KeyboardAndMouse::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, mouse_event},
+            WindowsAndMessaging::{GetCursorPos, SetCursorPos},
+        },
+    };
+
+    let mut start = POINT::default();
+    // SAFETY: start points to writable memory.
+    unsafe { GetCursorPos(&mut start) }
+        .map_err(|error| CoreError::Command(format!("cannot read cursor position: {error}")))?;
+    let steps = (duration_ms / 10).max(1);
+    for step in 1..=steps {
+        let t = step as f64 / steps as f64;
+        let eased = t * t * (3.0 - 2.0 * t);
+        let next_x = f64::from(start.x) + (f64::from(x) - f64::from(start.x)) * eased;
+        let next_y = f64::from(start.y) + (f64::from(y) - f64::from(start.y)) * eased;
+        // SAFETY: SetCursorPos accepts any pair of screen coordinates and clamps as needed.
+        unsafe { SetCursorPos(next_x.round() as i32, next_y.round() as i32) }
+            .map_err(|error| CoreError::Command(format!("cannot move cursor: {error}")))?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // SAFETY: mouse_event is called with documented button flags and no pointer payload.
+    unsafe { mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0) };
+    // SAFETY: releases the button pressed immediately above.
+    unsafe { mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0) };
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn click_mouse(_: i32, _: i32, _: u64) -> Result<(), CoreError> {
+    Err(CoreError::Unavailable(
+        "click_mouse requires Windows".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -338,6 +657,7 @@ mod tests {
                 requires_confirmation: false,
                 timeout_ms: 1_000,
                 parameters: BTreeMap::from([("executable".into(), "notepad.exe".into())]),
+                actions: Vec::new(),
             }],
             true,
         );
@@ -387,5 +707,59 @@ mod tests {
         );
         assert!(handlers.execute("echo", &BTreeMap::new()).await.is_err());
         assert_eq!(handlers.schemas()[0].name, "echo");
+    }
+
+    #[test]
+    fn builtin_handler_values_are_validated() {
+        let handlers = builtin_handlers(&[]).unwrap();
+        assert!(
+            handlers
+                .validate_action(
+                    "open_url",
+                    &BTreeMap::from([("url".into(), "file:///secret".into())]),
+                )
+                .is_err()
+        );
+        assert!(
+            handlers
+                .validate_action(
+                    "set_volume",
+                    &BTreeMap::from([("level".into(), "101".into())]),
+                )
+                .is_err()
+        );
+        assert!(
+            handlers
+                .validate_action(
+                    "click_mouse",
+                    &BTreeMap::from([
+                        ("x".into(), "10".into()),
+                        ("y".into(), "20".into()),
+                        ("duration_ms".into(), "0".into()),
+                    ]),
+                )
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_handler_rejects_parameters_outside_command_allowlist() {
+        let command = CommandConfig {
+            id: "site".into(),
+            enabled: true,
+            phrases: vec!["site".into()],
+            handler: "open_url".into(),
+            risk: RiskLevel::Low,
+            requires_confirmation: false,
+            timeout_ms: 1_000,
+            parameters: BTreeMap::from([("url".into(), "https://example.com".into())]),
+            actions: Vec::new(),
+        };
+        let handlers = builtin_handlers(&[command]).unwrap();
+        let parameters = BTreeMap::from([
+            ("_command_id".into(), "site".into()),
+            ("url".into(), "https://example.org".into()),
+        ]);
+        assert!(handlers.execute("open_url", &parameters).await.is_err());
     }
 }

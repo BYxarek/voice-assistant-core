@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.0] — 2026-08-02
+
+### Добавлено
+
+- встроенные handlers `open_url`, `set_volume` и high-risk `click_mouse` с плавным
+  перемещением курсора;
+- последовательные `commands.actions` с задержкой перед каждым действием.
+
+### Изменено
+
+- конфигурация увеличена до schema v5, публичный Rust API — до v4, IPC — до
+  protocol v5;
+- открытие URL вынесено из runtime-задачи, чтобы зависший Windows shell не
+  блокировал daemon.
+
 ## [1.3.0] — 2026-08-01
 
 ### Добавлено
@@ -94,3 +109,4 @@
 [1.1.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.1.1
 [1.2.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.2.0
 [1.3.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.3.0
+[1.4.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.4.0

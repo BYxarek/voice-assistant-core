@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::commands::{HandlerRegistry, normalize};
 
 /// Current on-disk and IPC configuration schema.
-pub const CURRENT_CONFIG_VERSION: u16 = 4;
+pub const CURRENT_CONFIG_VERSION: u16 = 5;
 
 /// Default pinned Alphacep model used for both STT and wake-word detection.
 pub const DEFAULT_MODEL_ID: &str = "alphacep/vosk-model-streaming-ru";
@@ -218,7 +218,8 @@ pub struct CommandConfig {
     pub enabled: bool,
     /// Exact phrases accepted after normalization.
     pub phrases: Vec<String>,
-    /// Registered [`crate::CommandHandler`] name.
+    /// Registered [`crate::CommandHandler`] name for a single-action command.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub handler: String,
     /// Security classification used by confirmation policy.
     #[serde(default)]
@@ -231,6 +232,38 @@ pub struct CommandConfig {
     pub timeout_ms: u64,
     #[serde(default)]
     /// Handler-specific values checked against [`crate::HandlerSchema`].
+    pub parameters: std::collections::BTreeMap<String, String>,
+    /// Ordered actions; mutually exclusive with `handler` and `parameters`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<CommandActionConfig>,
+}
+
+impl CommandConfig {
+    /// Returns the single legacy action or the configured ordered actions.
+    pub fn resolved_actions(&self) -> Vec<CommandActionConfig> {
+        if self.actions.is_empty() {
+            vec![CommandActionConfig {
+                handler: self.handler.clone(),
+                delay_ms: 0,
+                parameters: self.parameters.clone(),
+            }]
+        } else {
+            self.actions.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+/// One typed action in an ordered command sequence.
+pub struct CommandActionConfig {
+    /// Registered [`crate::CommandHandler`] name.
+    pub handler: String,
+    /// Delay before this action, in milliseconds.
+    #[serde(default)]
+    pub delay_ms: u64,
+    /// Handler-specific values checked against [`crate::HandlerSchema`].
+    #[serde(default)]
     pub parameters: std::collections::BTreeMap<String, String>,
 }
 
@@ -322,7 +355,7 @@ impl CoreConfig {
             .and_then(toml::Value::as_integer)
             .ok_or_else(|| ConfigError::Validation("schema_version is required".into()))?;
         match version {
-            1..=3 => {
+            1..=4 => {
                 value["schema_version"] = toml::Value::Integer(CURRENT_CONFIG_VERSION.into());
             }
             version if version == i64::from(CURRENT_CONFIG_VERSION) => {}
@@ -343,7 +376,7 @@ impl CoreConfig {
     /// Migrates an IPC-supplied configuration object to the current schema.
     pub fn migrate(mut self) -> Result<Self, ConfigError> {
         match self.schema_version {
-            1..=3 => self.schema_version = CURRENT_CONFIG_VERSION,
+            1..=4 => self.schema_version = CURRENT_CONFIG_VERSION,
             CURRENT_CONFIG_VERSION => {}
             version => {
                 return Err(ConfigError::Validation(format!(
@@ -383,9 +416,24 @@ impl CoreConfig {
     pub fn validate_with_handlers(&self, handlers: &HandlerRegistry) -> Result<(), ConfigError> {
         self.validate()?;
         for command in &self.commands {
-            handlers.validate_command(command).map_err(|error| {
-                ConfigError::Validation(format!("command {}: {error}", command.id))
-            })?;
+            for action in command.resolved_actions() {
+                handlers
+                    .validate_action(&action.handler, &action.parameters)
+                    .map_err(|error| {
+                        ConfigError::Validation(format!("command {}: {error}", command.id))
+                    })?;
+            }
+            if command.risk != RiskLevel::High
+                && command
+                    .resolved_actions()
+                    .iter()
+                    .any(|action| action.handler == "click_mouse")
+            {
+                return Err(ConfigError::Validation(format!(
+                    "command {}: click_mouse requires risk = \"high\"",
+                    command.id
+                )));
+            }
         }
         Ok(())
     }
@@ -486,11 +534,28 @@ impl CoreConfig {
                     command.id
                 )));
             }
-            if command.handler.trim().is_empty() {
+            if command.actions.len() > 32
+                || (!command.actions.is_empty()
+                    && (!command.handler.is_empty() || !command.parameters.is_empty()))
+            {
                 return Err(ConfigError::Validation(format!(
-                    "handler is empty: {}",
-                    command.handler
+                    "command {} must use either one handler or 1..=32 actions",
+                    command.id
                 )));
+            }
+            for action in command.resolved_actions() {
+                if action.handler.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "handler is empty: {}",
+                        command.id
+                    )));
+                }
+                if action.delay_ms > 60_000 {
+                    return Err(ConfigError::Validation(format!(
+                        "action delay_ms is out of range: {}",
+                        command.id
+                    )));
+                }
             }
             if !(1..=300_000).contains(&command.timeout_ms) {
                 return Err(ConfigError::Validation(format!(
@@ -591,7 +656,7 @@ mod tests {
     #[test]
     fn schema_one_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 4",
+            "schema_version = 5",
             "schema_version = 1",
             1,
         );
@@ -604,7 +669,7 @@ mod tests {
     #[test]
     fn schema_two_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 4",
+            "schema_version = 5",
             "schema_version = 2",
             1,
         );
@@ -617,7 +682,7 @@ mod tests {
     #[test]
     fn schema_three_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml")
-            .replacen("schema_version = 4", "schema_version = 3", 1)
+            .replacen("schema_version = 5", "schema_version = 3", 1)
             .replace("model = \"alphacep/vosk-model-streaming-ru\"\r\n", "")
             .replace("model = \"alphacep/vosk-model-streaming-ru\"\n", "");
         let config = CoreConfig::from_toml_str(&text).unwrap();
@@ -627,10 +692,36 @@ mod tests {
     }
 
     #[test]
+    fn schema_four_is_migrated() {
+        let text = include_str!("../../../config/assistant.example.toml").replacen(
+            "schema_version = 5",
+            "schema_version = 4",
+            1,
+        );
+        assert_eq!(
+            CoreConfig::from_toml_str(&text).unwrap().schema_version,
+            CURRENT_CONFIG_VERSION
+        );
+    }
+
+    #[test]
     fn duplicate_normalized_wake_word_alias_is_rejected() {
         let mut config = valid_config();
         config.wake_word.aliases = vec!["АССИСТЕНТ!".into()];
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn mouse_click_requires_high_risk_command() {
+        let mut config = valid_config();
+        let command = config
+            .commands
+            .iter_mut()
+            .find(|command| command.id == "browser_demo")
+            .unwrap();
+        command.risk = RiskLevel::Low;
+        let handlers = crate::builtin_handlers(&config.commands).unwrap();
+        assert!(config.validate_with_handlers(&handlers).is_err());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::audio::AudioDeviceInfo;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

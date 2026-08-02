@@ -80,7 +80,9 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
 
     match client.request(CoreRequest::ListHandlers).await.unwrap() {
         CoreResponse::Handlers { handlers } => {
-            assert!(handlers.iter().any(|handler| handler.name == "launch_app"));
+            for name in ["click_mouse", "launch_app", "open_url", "set_volume"] {
+                assert!(handlers.iter().any(|handler| handler.name == name));
+            }
         }
         response => panic!("unexpected handlers response: {response:?}"),
     }

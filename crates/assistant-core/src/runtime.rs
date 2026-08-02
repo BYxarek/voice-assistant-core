@@ -10,7 +10,7 @@ use crate::{
     commands::CommandRegistry,
     config::{PolicyConfig, RiskLevel},
     domain::{
-        AssistantEvent, AssistantState, CommandExecutor, CommandParameters,
+        AssistantEvent, AssistantState, CommandExecutor, CommandParameters, CommandResult,
         ConfirmationCancelReason, CoreError, SpeechRecognizer, Transcript, TranscriptionRequest,
     },
     metrics::CoreMetrics,
@@ -19,11 +19,16 @@ use crate::{
 
 struct PendingCommand {
     id: String,
-    handler: String,
-    parameters: CommandParameters,
+    actions: Vec<PendingAction>,
     timeout: Duration,
     expires_at: Instant,
     confirmation_id: Option<String>,
+}
+
+struct PendingAction {
+    handler: String,
+    parameters: CommandParameters,
+    delay: Duration,
 }
 
 const MAX_SUBMITTED_TEXT_BYTES: usize = 4_096;
@@ -337,12 +342,22 @@ impl Runtime {
         };
 
         let id = command.id.clone();
-        let mut parameters = command.parameters.clone();
-        parameters.insert("_command_id".into(), id.clone());
+        let actions = command
+            .resolved_actions()
+            .into_iter()
+            .map(|action| {
+                let mut parameters = action.parameters;
+                parameters.insert("_command_id".into(), id.clone());
+                PendingAction {
+                    handler: action.handler,
+                    parameters,
+                    delay: Duration::from_millis(action.delay_ms),
+                }
+            })
+            .collect();
         let pending = PendingCommand {
             id: id.clone(),
-            handler: command.handler.clone(),
-            parameters,
+            actions,
             timeout: Duration::from_millis(command.timeout_ms),
             expires_at: Instant::now() + Duration::from_millis(self.policy.confirmation_timeout_ms),
             confirmation_id: None,
@@ -423,10 +438,27 @@ impl Runtime {
             command_id: command.id.clone(),
         });
         let started = Instant::now();
-        let outcome = tokio::time::timeout(
-            command.timeout,
-            self.executor.execute(&command.handler, &command.parameters),
-        )
+        let outcome = tokio::time::timeout(command.timeout, async {
+            let action_count = command.actions.len();
+            let mut last_result = None;
+            for action in &command.actions {
+                if !action.delay.is_zero() {
+                    tokio::time::sleep(action.delay).await;
+                }
+                last_result = Some(
+                    self.executor
+                        .execute(&action.handler, &action.parameters)
+                        .await?,
+                );
+            }
+            Ok::<_, CoreError>(if action_count == 1 {
+                last_result.ok_or_else(|| CoreError::Command("command has no actions".into()))?
+            } else {
+                CommandResult {
+                    message: format!("completed {action_count} actions"),
+                }
+            })
+        })
         .await;
         self.metrics
             .observe_handler(started.elapsed().as_millis() as u64);
@@ -581,7 +613,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -590,7 +622,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::CommandConfig,
+        config::{CommandActionConfig, CommandConfig},
         domain::{CommandResult, SpeechRecognizer},
     };
 
@@ -604,6 +636,22 @@ mod tests {
             _: &CommandParameters,
         ) -> Result<CommandResult, CoreError> {
             self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(CommandResult {
+                message: "ok".into(),
+            })
+        }
+    }
+
+    struct RecordingExecutor(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl CommandExecutor for RecordingExecutor {
+        async fn execute(
+            &self,
+            handler: &str,
+            _: &CommandParameters,
+        ) -> Result<CommandResult, CoreError> {
+            self.0.lock().unwrap().push(handler.into());
             Ok(CommandResult {
                 message: "ok".into(),
             })
@@ -685,6 +733,7 @@ mod tests {
             requires_confirmation: false,
             timeout_ms: 1_000,
             parameters: BTreeMap::from([("executable".into(), "notepad.exe".into())]),
+            actions: Vec::new(),
         }
     }
 
@@ -737,6 +786,42 @@ mod tests {
         runtime.process_text("открой блокнот".into()).await.unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(runtime.state(), AssistantState::Cooldown);
+    }
+
+    #[tokio::test]
+    async fn command_actions_execute_in_order_with_delays() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut sequenced = command(RiskLevel::Low);
+        sequenced.handler.clear();
+        sequenced.parameters.clear();
+        sequenced.actions = vec![
+            CommandActionConfig {
+                handler: "first".into(),
+                delay_ms: 0,
+                parameters: BTreeMap::new(),
+            },
+            CommandActionConfig {
+                handler: "second".into(),
+                delay_ms: 20,
+                parameters: BTreeMap::new(),
+            },
+        ];
+        let phrase = sequenced.phrases[0].clone();
+        let mut runtime = Runtime::new(
+            Arc::new(FailingRecognizer),
+            CommandRegistry::new(vec![sequenced], true),
+            Arc::new(RecordingExecutor(Arc::clone(&calls))),
+            "assistant".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        let started = Instant::now();
+        runtime.process_text(phrase).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["first", "second"]);
+        assert!(started.elapsed() >= Duration::from_millis(20));
     }
 
     #[tokio::test]

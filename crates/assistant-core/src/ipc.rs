@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 
 use crate::{
     audio::AudioDeviceInfo,
@@ -99,6 +99,10 @@ pub enum CoreRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing Config would complicate the public IPC API without changing its wire format"
+)]
 /// Versioned responses and event frames returned by the core IPC server.
 pub enum CoreResponse {
     /// Response to `get_status`.
@@ -209,7 +213,7 @@ mod tests {
         let message = Envelope::new("golden-1", CoreRequest::GetStatus);
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
-            r#"{"protocol_version":5,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+            r#"{"protocol_version":6,"request_id":"golden-1","payload":{"type":"get_status"}}"#
         );
     }
 
@@ -218,7 +222,7 @@ mod tests {
         let begin = Envelope::new("manual-1", CoreRequest::BeginCapture);
         assert_eq!(
             String::from_utf8(encode(&begin).unwrap()).unwrap(),
-            r#"{"protocol_version":5,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
+            r#"{"protocol_version":6,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
         );
         let text = Envelope::new(
             "manual-2",
@@ -228,12 +232,25 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&text).unwrap()).unwrap(),
-            r#"{"protocol_version":5,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+            r#"{"protocol_version":6,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
         );
     }
 
     #[test]
     fn microphone_diagnostic_events_have_stable_wire_formats() {
+        let partial = Envelope::new(
+            "event-0",
+            CoreResponse::Event {
+                event: AssistantEvent::TranscriptPartial {
+                    text: "открой".into(),
+                    confidence: None,
+                },
+            },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&partial).unwrap()).unwrap(),
+            r#"{"protocol_version":6,"request_id":"event-0","payload":{"type":"event","event":{"type":"transcript_partial","text":"открой","confidence":null}}}"#
+        );
         let level = Envelope::new(
             "event-1",
             CoreResponse::Event {
@@ -242,7 +259,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&level).unwrap()).unwrap(),
-            r#"{"protocol_version":5,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
+            r#"{"protocol_version":6,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
         );
         let unavailable = Envelope::new(
             "event-2",
@@ -254,7 +271,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&unavailable).unwrap()).unwrap(),
-            r#"{"protocol_version":5,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
+            r#"{"protocol_version":6,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
         );
     }
 }

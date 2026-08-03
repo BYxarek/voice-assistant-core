@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::CommandConfig,
+    config::{CommandConfig, SlotConfig, SlotType},
     domain::{CommandExecutor, CommandParameters, CommandResult, CoreError},
 };
 
@@ -35,7 +35,15 @@ pub fn normalize(text: &str, normalize_yo: bool) -> String {
         .join(" ")
 }
 
-/// Exact-match registry built from validated command configuration.
+/// One matched command and its validated typed slot values.
+pub struct CommandMatch<'a> {
+    /// Matched command configuration.
+    pub command: &'a CommandConfig,
+    /// Canonical values captured from phrase placeholders.
+    pub slots: CommandParameters,
+}
+
+/// Exact and typed-slot registry built from validated command configuration.
 pub struct CommandRegistry {
     commands: Vec<CommandConfig>,
     normalize_yo: bool,
@@ -50,10 +58,14 @@ impl CommandRegistry {
         }
     }
 
+    /// Applies the registry's configured text normalization policy.
+    pub fn normalized(&self, text: &str) -> String {
+        normalize(text, self.normalize_yo)
+    }
+
     /// Finds an enabled command by exact normalized phrase.
     pub fn find(&self, text: &str) -> Option<&CommandConfig> {
-        let text = normalize(text, self.normalize_yo);
-        self.find_normalized(&text)
+        self.match_text(text).map(|matched| matched.command)
     }
 
     /// Matches an exact command, optionally after a known wake-word prefix.
@@ -67,27 +79,97 @@ impl CommandRegistry {
         text: &str,
         wake_words: impl IntoIterator<Item = &'a str>,
     ) -> Option<&CommandConfig> {
+        self.match_after_wake_words(text, wake_words)
+            .map(|matched| matched.command)
+    }
+
+    /// Matches a command and returns validated values captured by `{slot}` tokens.
+    pub fn match_text(&self, text: &str) -> Option<CommandMatch<'_>> {
         let text = normalize(text, self.normalize_yo);
-        self.find_normalized(&text).or_else(|| {
+        self.match_normalized(&text)
+    }
+
+    /// Matches a command with slots, optionally after any known wake-word prefix.
+    pub fn match_after_wake_words<'a>(
+        &self,
+        text: &str,
+        wake_words: impl IntoIterator<Item = &'a str>,
+    ) -> Option<CommandMatch<'_>> {
+        let text = normalize(text, self.normalize_yo);
+        self.match_normalized(&text).or_else(|| {
             wake_words.into_iter().find_map(|wake_word| {
                 let wake_word = normalize(wake_word, self.normalize_yo);
                 text.strip_prefix(&wake_word)
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
-                    .and_then(|text| self.find_normalized(text))
+                    .and_then(|text| self.match_normalized(text))
             })
         })
     }
 
-    fn find_normalized(&self, text: &str) -> Option<&CommandConfig> {
-        self.commands.iter().find(|command| {
-            command.enabled
-                && command
-                    .phrases
-                    .iter()
-                    .any(|phrase| normalize(phrase, self.normalize_yo) == *text)
+    fn match_normalized(&self, text: &str) -> Option<CommandMatch<'_>> {
+        self.commands.iter().find_map(|command| {
+            command.enabled.then_some(command).and_then(|command| {
+                command.phrases.iter().find_map(|phrase| {
+                    match_phrase(phrase, text, command, self.normalize_yo)
+                        .map(|slots| CommandMatch { command, slots })
+                })
+            })
         })
     }
+}
+
+enum PatternToken {
+    Literal(String),
+    Slot(String),
+}
+
+fn match_phrase(
+    phrase: &str,
+    text: &str,
+    command: &CommandConfig,
+    normalize_yo: bool,
+) -> Option<CommandParameters> {
+    let mut pattern = Vec::new();
+    for token in phrase.split_whitespace() {
+        if let Some(name) = placeholder(token) {
+            pattern.push(PatternToken::Slot(name.into()));
+        } else {
+            pattern.extend(
+                normalize(token, normalize_yo)
+                    .split_whitespace()
+                    .map(|token| PatternToken::Literal(token.into())),
+            );
+        }
+    }
+    let words: Vec<_> = text.split_whitespace().collect();
+    if pattern.len() != words.len() {
+        return None;
+    }
+    let mut slots = CommandParameters::new();
+    for (pattern, word) in pattern.iter().zip(words) {
+        match pattern {
+            PatternToken::Literal(literal) if literal == word => {}
+            PatternToken::Slot(name) => {
+                let value = command.slots.get(name)?.canonicalize(word, normalize_yo)?;
+                if slots
+                    .insert(name.clone(), value.clone())
+                    .is_some_and(|old| old != value)
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(slots)
+}
+
+fn placeholder(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .filter(|value| !value.is_empty() && !value.contains('{') && !value.contains('}'))
 }
 
 /// Stable parameter contract published by a command handler.
@@ -206,7 +288,17 @@ impl HandlerRegistry {
     /// Validates one command against the registered extension contract.
     pub fn validate_command(&self, command: &CommandConfig) -> Result<(), CoreError> {
         for action in command.resolved_actions() {
-            self.validate_action(&action.handler, &action.parameters)?;
+            let mut parameters = action.parameters;
+            for value in parameters.values_mut() {
+                if let Some(name) = placeholder(value) {
+                    *value = command
+                        .slots
+                        .get(name)
+                        .and_then(|slot| slot.sample(true))
+                        .ok_or_else(|| CoreError::Command(format!("invalid slot: {name}")))?;
+                }
+            }
+            self.validate_action(&action.handler, &parameters)?;
         }
         Ok(())
     }
@@ -429,17 +521,36 @@ impl CommandExecutor for LaunchAppExecutor {
     }
 }
 
-type ParameterAllowlist = HashMap<String, Vec<CommandParameters>>;
+#[derive(Clone)]
+enum AllowedValue {
+    Exact(String),
+    Slot(SlotConfig),
+}
+
+type AllowedParameters = BTreeMap<String, AllowedValue>;
+type ParameterAllowlist = HashMap<String, Vec<AllowedParameters>>;
 
 fn parameter_allowlist(commands: &[CommandConfig], handler: &str) -> ParameterAllowlist {
-    let mut allowlist = HashMap::<String, Vec<CommandParameters>>::new();
+    let mut allowlist = ParameterAllowlist::new();
     for command in commands.iter().filter(|command| command.enabled) {
         for action in command.resolved_actions() {
             if action.handler == handler {
+                let parameters = action
+                    .parameters
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let allowed = placeholder(&value)
+                            .and_then(|slot| command.slots.get(slot))
+                            .cloned()
+                            .map(AllowedValue::Slot)
+                            .unwrap_or(AllowedValue::Exact(value));
+                        (name, allowed)
+                    })
+                    .collect();
                 allowlist
                     .entry(command.id.clone())
                     .or_default()
-                    .push(action.parameters);
+                    .push(parameters);
             }
         }
     }
@@ -456,13 +567,32 @@ fn require_allowlisted(
         .filter(|(key, _)| !key.starts_with('_'))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    if allowlist
-        .get(command_id)
-        .is_some_and(|entries| entries.contains(&configured))
-    {
+    if allowlist.get(command_id).is_some_and(|entries| {
+        entries.iter().any(|allowed| {
+            allowed.len() == configured.len()
+                && allowed.iter().all(|(name, rule)| {
+                    configured
+                        .get(name)
+                        .is_some_and(|value| allowed_value_matches(rule, value))
+                })
+        })
+    }) {
         Ok(())
     } else {
         Err(CoreError::Command("action is not allowlisted".into()))
+    }
+}
+
+fn allowed_value_matches(rule: &AllowedValue, value: &str) -> bool {
+    match rule {
+        AllowedValue::Exact(expected) => expected == value,
+        AllowedValue::Slot(slot) if slot.value_type == SlotType::Text => {
+            slot.values.iter().any(|allowed| {
+                normalize(allowed, true) == normalize(value, true)
+                    || normalize(allowed, false) == normalize(value, false)
+            })
+        }
+        AllowedValue::Slot(slot) => slot.canonicalize(value, false).is_some(),
     }
 }
 
@@ -652,6 +782,7 @@ mod tests {
                 id: "open".into(),
                 enabled: true,
                 phrases: vec!["открой блокнот".into()],
+                slots: BTreeMap::new(),
                 handler: "launch_app".into(),
                 risk: RiskLevel::Low,
                 requires_confirmation: false,
@@ -676,6 +807,36 @@ mod tests {
                 .find_after_wake_words("помощник, открой блокнот", ["ассистент", "помощник"],)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn captures_and_validates_typed_integer_slot() {
+        let registry = CommandRegistry::new(
+            vec![CommandConfig {
+                id: "volume".into(),
+                enabled: true,
+                phrases: vec!["громкость {level}".into()],
+                slots: BTreeMap::from([(
+                    "level".into(),
+                    SlotConfig {
+                        value_type: SlotType::Integer,
+                        min: Some(0),
+                        max: Some(100),
+                        values: Vec::new(),
+                    },
+                )]),
+                handler: "set_volume".into(),
+                risk: RiskLevel::Low,
+                requires_confirmation: false,
+                timeout_ms: 1_000,
+                parameters: BTreeMap::from([("level".into(), "{level}".into())]),
+                actions: Vec::new(),
+            }],
+            true,
+        );
+        let matched = registry.match_text("Громкость 35").unwrap();
+        assert_eq!(matched.slots["level"], "35");
+        assert!(registry.match_text("громкость 101").is_none());
     }
 
     struct EchoHandler;
@@ -748,6 +909,7 @@ mod tests {
             id: "site".into(),
             enabled: true,
             phrases: vec!["site".into()],
+            slots: BTreeMap::new(),
             handler: "open_url".into(),
             risk: RiskLevel::Low,
             requires_confirmation: false,
@@ -761,5 +923,50 @@ mod tests {
             ("url".into(), "https://example.org".into()),
         ]);
         assert!(handlers.execute("open_url", &parameters).await.is_err());
+    }
+
+    #[test]
+    fn builtin_allowlist_accepts_only_values_allowed_by_slot() {
+        let command = CommandConfig {
+            id: "volume".into(),
+            enabled: true,
+            phrases: vec!["громкость {level}".into()],
+            slots: BTreeMap::from([(
+                "level".into(),
+                SlotConfig {
+                    value_type: SlotType::Integer,
+                    min: Some(0),
+                    max: Some(100),
+                    values: Vec::new(),
+                },
+            )]),
+            handler: "set_volume".into(),
+            risk: RiskLevel::Low,
+            requires_confirmation: false,
+            timeout_ms: 1_000,
+            parameters: BTreeMap::from([("level".into(), "{level}".into())]),
+            actions: Vec::new(),
+        };
+        let allowlist = parameter_allowlist(&[command], "set_volume");
+        assert!(
+            require_allowlisted(
+                &allowlist,
+                &BTreeMap::from([
+                    ("_command_id".into(), "volume".into()),
+                    ("level".into(), "35".into()),
+                ]),
+            )
+            .is_ok()
+        );
+        assert!(
+            require_allowlisted(
+                &allowlist,
+                &BTreeMap::from([
+                    ("_command_id".into(), "volume".into()),
+                    ("level".into(), "101".into()),
+                ]),
+            )
+            .is_err()
+        );
     }
 }

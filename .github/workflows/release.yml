@@ -23,7 +23,7 @@ jobs:
           Get-ChildItem target\release -Filter *.dll -File |
             Copy-Item -Destination package\
           Copy-Item config\assistant.example.toml package\
-          Copy-Item README.md,LICENSE,CHANGELOG.md package\
+          Copy-Item README.md,README.en.md,LICENSE,CHANGELOG.md package\
           $archive = "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"
           Compress-Archive package\* $archive
 

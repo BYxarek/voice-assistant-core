@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -31,6 +32,13 @@ struct PendingAction {
     delay: Duration,
 }
 
+#[derive(Default)]
+struct HandlerGuard {
+    last_started: Option<Instant>,
+    consecutive_failures: u32,
+    opened_at: Option<Instant>,
+}
+
 const MAX_SUBMITTED_TEXT_BYTES: usize = 4_096;
 
 /// Stateful command pipeline shared by the daemon and diagnostic CLI.
@@ -49,6 +57,9 @@ pub struct Runtime {
     pending: Option<PendingCommand>,
     confirmation_sequence: u64,
     streaming_stt: bool,
+    confirming_by_voice: bool,
+    last_partial: String,
+    handler_guards: HashMap<String, HandlerGuard>,
 }
 
 impl Runtime {
@@ -108,6 +119,9 @@ impl Runtime {
             pending: None,
             confirmation_sequence: 0,
             streaming_stt: false,
+            confirming_by_voice: false,
+            last_partial: String::new(),
+            handler_guards: HashMap::new(),
         }
     }
 
@@ -212,6 +226,12 @@ impl Runtime {
 
     /// Publishes wake-word and capture states at detection time.
     pub fn start_command_capture(&mut self) -> Result<(), CoreError> {
+        if self.state == AssistantState::AwaitingConfirmation
+            && self.policy.voice_confirmations_enabled
+        {
+            self.confirming_by_voice = true;
+            return self.transition(AssistantState::CapturingCommand);
+        }
         self.transition(AssistantState::SpeechDetected)?;
         self.transition(AssistantState::WakeWordDetected)?;
         self.transition(AssistantState::CapturingCommand)
@@ -219,17 +239,29 @@ impl Runtime {
 
     /// Starts capture requested by a trusted application without a wake word.
     pub fn start_manual_capture(&mut self) -> Result<(), CoreError> {
+        if self.state == AssistantState::AwaitingConfirmation {
+            if !self.policy.voice_confirmations_enabled {
+                return Err(CoreError::Busy("voice confirmation is disabled".into()));
+            }
+            self.confirming_by_voice = true;
+        }
         self.transition(AssistantState::CapturingCommand)
     }
 
     /// Returns an empty or too-short manual capture to idle listening.
     pub fn cancel_capture(&mut self) -> Result<(), CoreError> {
         self.streaming_stt = false;
+        self.last_partial.clear();
+        if self.confirming_by_voice {
+            self.confirming_by_voice = false;
+            return self.transition(AssistantState::AwaitingConfirmation);
+        }
         self.transition(AssistantState::IdleListening)
     }
 
     /// Starts incremental STT as soon as command capture begins.
     pub async fn begin_transcription_stream(&mut self, sample_rate: u32) -> Result<(), CoreError> {
+        self.last_partial.clear();
         self.streaming_stt =
             match tokio::time::timeout(self.stt_timeout, self.recognizer.begin_stream(sample_rate))
                 .await
@@ -248,9 +280,22 @@ impl Runtime {
     /// Forwards one command-audio frame to an active incremental STT session.
     pub async fn push_transcription_stream(&mut self, samples: Vec<f32>) -> Result<(), CoreError> {
         if self.streaming_stt {
-            match tokio::time::timeout(self.stt_timeout, self.recognizer.push_stream(samples)).await
+            match tokio::time::timeout(
+                self.stt_timeout,
+                self.recognizer.push_stream_partial(samples),
+            )
+            .await
             {
-                Ok(Ok(())) => {}
+                Ok(Ok(Some(partial)))
+                    if !partial.text.trim().is_empty() && partial.text != self.last_partial =>
+                {
+                    self.last_partial.clone_from(&partial.text);
+                    let _ = self.events.send(AssistantEvent::TranscriptPartial {
+                        text: partial.text,
+                        confidence: partial.confidence,
+                    });
+                }
+                Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
                     self.streaming_stt = false;
                     return Err(error);
@@ -271,6 +316,11 @@ impl Runtime {
             return Err(CoreError::Command(format!(
                 "submitted text must contain 1..={MAX_SUBMITTED_TEXT_BYTES} UTF-8 bytes"
             )));
+        }
+        if self.state == AssistantState::AwaitingConfirmation
+            && self.policy.voice_confirmations_enabled
+        {
+            return self.process_confirmation_text(text).await;
         }
         self.transition(AssistantState::MatchingCommand)?;
         self.match_text(text, false).await
@@ -312,41 +362,94 @@ impl Runtime {
                 return self.fail("stt", CoreError::Recognition(message.into()));
             }
         };
+        self.last_partial.clear();
         if transcript.text.trim().is_empty() {
             let _ = self.events.send(AssistantEvent::TranscriptUnavailable {
                 reason: crate::TranscriptUnavailableReason::Silence,
             });
-            self.transition(AssistantState::MatchingCommand)?;
-            self.enter_cooldown()?;
+            if self.confirming_by_voice {
+                self.confirming_by_voice = false;
+                self.transition(AssistantState::AwaitingConfirmation)?;
+            } else {
+                self.transition(AssistantState::MatchingCommand)?;
+                self.enter_cooldown()?;
+            }
             return Ok(());
         }
         let _ = self.events.send(AssistantEvent::TranscriptReady {
             text: transcript.text.clone(),
             confidence: transcript.confidence,
         });
+        if self.confirming_by_voice {
+            self.confirming_by_voice = false;
+            return self.process_confirmation_text(transcript.text).await;
+        }
         self.transition(AssistantState::MatchingCommand)?;
         self.match_text(transcript.text, true).await
     }
 
-    async fn match_text(&mut self, text: String, allow_wake_word: bool) -> Result<(), CoreError> {
-        let command = if allow_wake_word {
-            self.registry
-                .find_after_wake_words(&text, self.wake_words.iter().map(String::as_str))
-        } else {
-            self.registry.find(&text)
+    async fn process_confirmation_text(&mut self, text: String) -> Result<(), CoreError> {
+        let text = self.registry.normalized(&text);
+        let matches = |phrases: &[String]| {
+            phrases
+                .iter()
+                .any(|phrase| self.registry.normalized(phrase) == text)
         };
-        let Some(command) = command else {
+        let accepted = matches(&self.policy.confirmation_accept_phrases);
+        let cancelled = matches(&self.policy.confirmation_cancel_phrases);
+        if self.state != AssistantState::AwaitingConfirmation {
+            self.transition(AssistantState::AwaitingConfirmation)?;
+        }
+        if accepted {
+            let pending = self.pending.take().ok_or_else(|| {
+                CoreError::Confirmation("no command is awaiting confirmation".into())
+            })?;
+            if Instant::now() >= pending.expires_at {
+                self.pending = Some(pending);
+                self.cancel_pending(ConfirmationCancelReason::Expired)?;
+                return Err(CoreError::Confirmation("confirmation expired".into()));
+            }
+            return self.execute(pending).await;
+        }
+        if cancelled {
+            return self.cancel_pending(ConfirmationCancelReason::User);
+        }
+        let _ = self
+            .events
+            .send(AssistantEvent::ConfirmationUnrecognized { text });
+        Ok(())
+    }
+
+    async fn match_text(&mut self, text: String, allow_wake_word: bool) -> Result<(), CoreError> {
+        let matched = if allow_wake_word {
+            self.registry
+                .match_after_wake_words(&text, self.wake_words.iter().map(String::as_str))
+        } else {
+            self.registry.match_text(&text)
+        };
+        let Some(matched) = matched else {
             let _ = self.events.send(AssistantEvent::CommandNotMatched { text });
             self.enter_cooldown()?;
             return Ok(());
         };
 
+        let command = matched.command;
+        let slots = matched.slots;
         let id = command.id.clone();
         let actions = command
             .resolved_actions()
             .into_iter()
             .map(|action| {
                 let mut parameters = action.parameters;
+                for value in parameters.values_mut() {
+                    if let Some(name) = value
+                        .strip_prefix('{')
+                        .and_then(|value| value.strip_suffix('}'))
+                        && let Some(slot) = slots.get(name)
+                    {
+                        value.clone_from(slot);
+                    }
+                }
                 parameters.insert("_command_id".into(), id.clone());
                 PendingAction {
                     handler: action.handler,
@@ -438,6 +541,7 @@ impl Runtime {
             command_id: command.id.clone(),
         });
         let started = Instant::now();
+        let mut current_handler = None;
         let outcome = tokio::time::timeout(command.timeout, async {
             let action_count = command.actions.len();
             let mut last_result = None;
@@ -445,11 +549,22 @@ impl Runtime {
                 if !action.delay.is_zero() {
                     tokio::time::sleep(action.delay).await;
                 }
-                last_result = Some(
-                    self.executor
-                        .execute(&action.handler, &action.parameters)
-                        .await?,
-                );
+                self.check_handler(&action.handler)?;
+                current_handler = Some(action.handler.clone());
+                match self
+                    .executor
+                    .execute(&action.handler, &action.parameters)
+                    .await
+                {
+                    Ok(result) => {
+                        self.record_handler_success(&action.handler);
+                        last_result = Some(result);
+                    }
+                    Err(error) => {
+                        self.record_handler_failure(&action.handler);
+                        return Err(error);
+                    }
+                }
             }
             Ok::<_, CoreError>(if action_count == 1 {
                 last_result.ok_or_else(|| CoreError::Command("command has no actions".into()))?
@@ -465,7 +580,12 @@ impl Runtime {
         let result = match outcome {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => return self.fail("command", error),
-            Err(_) => return self.fail("command", CoreError::Command("command timed out".into())),
+            Err(_) => {
+                if let Some(handler) = current_handler {
+                    self.record_handler_failure(&handler);
+                }
+                return self.fail("command", CoreError::Command("command timed out".into()));
+            }
         };
         self.metrics.command_completed();
         let _ = self.events.send(AssistantEvent::CommandFinished {
@@ -473,6 +593,49 @@ impl Runtime {
             result,
         });
         self.enter_cooldown()
+    }
+
+    fn check_handler(&mut self, handler: &str) -> Result<(), CoreError> {
+        let now = Instant::now();
+        let guard = self.handler_guards.entry(handler.into()).or_default();
+        if let Some(opened_at) = guard.opened_at {
+            let reset = Duration::from_millis(self.policy.handler_circuit_breaker_ms);
+            if now.duration_since(opened_at) < reset {
+                return Err(CoreError::Command(format!(
+                    "handler circuit is open: {handler}"
+                )));
+            }
+            guard.opened_at = None;
+        }
+        let rate_limit = Duration::from_millis(self.policy.handler_rate_limit_ms);
+        if !rate_limit.is_zero()
+            && guard
+                .last_started
+                .is_some_and(|started| now.duration_since(started) < rate_limit)
+        {
+            return Err(CoreError::Command(format!(
+                "handler rate limit exceeded: {handler}"
+            )));
+        }
+        guard.last_started = Some(now);
+        Ok(())
+    }
+
+    fn record_handler_success(&mut self, handler: &str) {
+        let guard = self.handler_guards.entry(handler.into()).or_default();
+        guard.consecutive_failures = 0;
+        guard.opened_at = None;
+    }
+
+    fn record_handler_failure(&mut self, handler: &str) {
+        if self.policy.handler_failure_threshold == 0 {
+            return;
+        }
+        let guard = self.handler_guards.entry(handler.into()).or_default();
+        guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+        if guard.consecutive_failures >= self.policy.handler_failure_threshold {
+            guard.opened_at = Some(Instant::now());
+        }
     }
 
     /// Returns the current one-time confirmation token.
@@ -535,12 +698,14 @@ impl Runtime {
         if let Some((registry, executor)) = update.commands {
             self.registry = registry;
             self.executor = executor;
+            self.handler_guards.clear();
         }
         if let Some(wake_words) = update.wake_words {
             self.wake_words = wake_words;
         }
         if let Some(policy) = update.policy {
             self.policy = policy;
+            self.handler_guards.clear();
         }
         if let Some(stt_timeout) = update.stt_timeout {
             self.stt_timeout = stt_timeout;
@@ -723,11 +888,63 @@ mod tests {
         }
     }
 
+    struct FailingExecutor(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl CommandExecutor for FailingExecutor {
+        async fn execute(
+            &self,
+            _: &str,
+            _: &CommandParameters,
+        ) -> Result<CommandResult, CoreError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Err(CoreError::Command("failed".into()))
+        }
+    }
+
+    struct ConfirmationRecognizer(AtomicUsize);
+
+    #[async_trait]
+    impl SpeechRecognizer for ConfirmationRecognizer {
+        async fn transcribe(&self, _: TranscriptionRequest) -> Result<Transcript, CoreError> {
+            let text = if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                "открой блокнот"
+            } else {
+                "да"
+            };
+            Ok(Transcript {
+                text: text.into(),
+                confidence: None,
+            })
+        }
+    }
+
+    struct PartialRecognizer;
+
+    #[async_trait]
+    impl SpeechRecognizer for PartialRecognizer {
+        async fn transcribe(&self, _: TranscriptionRequest) -> Result<Transcript, CoreError> {
+            unreachable!()
+        }
+
+        async fn begin_stream(&self, _: u32) -> Result<bool, CoreError> {
+            Ok(true)
+        }
+
+        async fn push_stream_partial(&self, _: Vec<f32>) -> Result<Option<Transcript>, CoreError> {
+            Ok(Some(Transcript {
+                text: "открой".into(),
+                confidence: None,
+            }))
+        }
+    }
+
     fn command(risk: RiskLevel) -> CommandConfig {
         CommandConfig {
             id: "test".into(),
             enabled: true,
             phrases: vec!["открой блокнот".into()],
+            slots: BTreeMap::new(),
             handler: "launch_app".into(),
             risk,
             requires_confirmation: false,
@@ -918,6 +1135,99 @@ mod tests {
         runtime.confirm_command(&confirmation_id).await.unwrap();
         assert_eq!(runtime.state(), AssistantState::Cooldown);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_command_can_be_confirmed_by_voice() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new(
+            Arc::new(ConfirmationRecognizer(AtomicUsize::new(0))),
+            CommandRegistry::new(vec![command(RiskLevel::High)], true),
+            Arc::new(CountingExecutor(Arc::clone(&calls))),
+            "ассистент".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        runtime.process_command_audio(request()).await.unwrap();
+        runtime.start_command_capture().unwrap();
+        runtime.process_captured_audio(request()).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.state(), AssistantState::Cooldown);
+    }
+
+    #[tokio::test]
+    async fn changed_partial_transcript_is_published_once() {
+        let mut runtime = Runtime::new(
+            Arc::new(PartialRecognizer),
+            CommandRegistry::new(Vec::new(), true),
+            Arc::new(CountingExecutor(Arc::new(AtomicUsize::new(0)))),
+            "ассистент".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        let mut events = runtime.subscribe();
+        runtime.start().unwrap();
+        runtime.start_command_capture().unwrap();
+        runtime.begin_transcription_stream(16_000).await.unwrap();
+        runtime.push_transcription_stream(vec![0.1]).await.unwrap();
+        runtime.push_transcription_stream(vec![0.1]).await.unwrap();
+        let partials = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| matches!(event, AssistantEvent::TranscriptPartial { .. }))
+            .count();
+        assert_eq!(partials, 1);
+    }
+
+    #[tokio::test]
+    async fn handler_rate_limit_rejects_repeated_start() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = PolicyConfig {
+            handler_rate_limit_ms: 60_000,
+            ..PolicyConfig::default()
+        };
+        let mut runtime = Runtime::new(
+            Arc::new(FailingRecognizer),
+            CommandRegistry::new(vec![command(RiskLevel::Low)], true),
+            Arc::new(CountingExecutor(Arc::clone(&calls))),
+            "ассистент".into(),
+            policy,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        runtime.process_text("открой блокнот".into()).await.unwrap();
+        runtime.complete_cooldown().unwrap();
+        assert!(runtime.process_text("открой блокнот".into()).await.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn handler_circuit_opens_after_consecutive_failures() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = PolicyConfig {
+            handler_failure_threshold: 2,
+            ..PolicyConfig::default()
+        };
+        let mut runtime = Runtime::new(
+            Arc::new(FailingRecognizer),
+            CommandRegistry::new(vec![command(RiskLevel::Low)], true),
+            Arc::new(FailingExecutor(Arc::clone(&calls))),
+            "ассистент".into(),
+            policy,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            CoreMetrics::default(),
+        );
+        runtime.start().unwrap();
+        for _ in 0..3 {
+            assert!(runtime.process_text("открой блокнот".into()).await.is_err());
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

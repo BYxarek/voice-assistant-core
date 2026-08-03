@@ -1,5 +1,7 @@
 # Voice Assistant Core
 
+[Русский](README.md) | [English](README.en.md)
+
 [![CI](https://github.com/BYxarek/voice-assistant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/BYxarek/voice-assistant-core/actions/workflows/ci.yml)
 [![Documentation](https://github.com/BYxarek/voice-assistant-core/actions/workflows/docs.yml/badge.svg)](https://byxarek.github.io/voice-assistant-core/)
 [![Release](https://img.shields.io/github/v/release/BYxarek/voice-assistant-core)](https://github.com/BYxarek/voice-assistant-core/releases)
@@ -9,8 +11,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.4.0**. Публичный Rust extension API v4 и IPC
-protocol v5. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.5.0**. Публичный Rust extension API v5 и IPC
+protocol v6. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -29,15 +31,18 @@ inference изолированы от GUI.
 ## Возможности
 
 - bounded audio pipeline: CPAL → mono → 16 кГц → KWS → VAD → STT;
+- при `Starting`/`Suspended` worker осушает bounded input без resample, VAD и inference;
 - отдельная задача runtime и supervised persistent STT worker с warm-up, timeout watchdog,
   bounded restart budget и exponential backoff;
-- потоковый STT начинается сразу после wake word и декодирует аудио параллельно захвату;
+- потоковый STT начинается сразу после wake word, декодирует аудио параллельно захвату
+  100-мс батчами и публикует изменившиеся partial-транскрипты;
 - IPC доступен в состоянии `Starting`, пока cancellable blocking worker загружает STT и публикует прогресс;
 - восстановление микрофона после ошибки или зависания callback и автоматическое
   переключение при смене default input;
 - ручной push-to-talk и безопасная отправка текста через IPC без обхода command policy;
 - типизированные обработчики команд без передачи текста в shell;
-- одноразовый `confirmation_id`, timeout и полное отключение подтверждений;
+- одноразовый `confirmation_id`, голосовое «да/нет», timeout и полное отключение подтверждений;
+- типизированные allowlisted-слоты команд, rate limit и circuit breaker handlers;
 - запуск без модели, установка/отмена/проверка модели во время работы;
 - pinned model revision, SHA-256 manifest и атомарная активация;
 - дифференциальное применение конфигурации без перезагрузки незатронутых компонентов;
@@ -100,21 +105,22 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Публичный Rust API v4
+## Публичный Rust API v5
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
-`CORE_API_VERSION` равен `4`. В v4 входят:
+`CORE_API_VERSION` равен `5`. В v5 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
   `spawn_runtime_service` — embedding API;
 - `CoreIpcClient`, `EventSubscription`, `CoreRequest`, `CoreResponse`,
   `Envelope`, `IpcErrorCode` — IPC API;
-- `CoreConfig`, `AppPaths`, публичные доменные события, состояния и ошибки;
+- `CoreConfig`, `CommandConfig`, `SlotConfig`, публичные доменные события, состояния и ошибки;
+- streaming `SpeechRecognizer::push_stream_partial`;
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v5; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v6; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -157,7 +163,83 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v5
+## IPC protocol v6
+
+### Web Speech API как внешний STT
+
+Web Speech API можно подключить без изменения ядра и IPC-протокола. Браузерный
+`SpeechRecognition` распознаёт речь, а GUI передаёт только финальный текст в уже
+существующий запрос `submit_text`:
+
+```text
+SpeechRecognition → native bridge GUI → Windows named pipe
+                  → CoreRequest::SubmitText → команды и policy ядра
+```
+
+Обычная веб-страница не может напрямую открыть Windows named pipe. В WebView2,
+Tauri или Electron нужен узкий native bridge, который предоставляет только
+метод `submitText(text)` и не даёт web-контенту доступ к shell или произвольным
+IPC-запросам.
+
+```javascript
+const Recognition =
+  window.SpeechRecognition ?? window.webkitSpeechRecognition;
+
+if (!Recognition) {
+  throw new Error("Web Speech API недоступен в этом браузере");
+}
+
+const recognition = new Recognition();
+recognition.lang = "ru-RU";
+recognition.continuous = false;
+recognition.interimResults = true;
+recognition.maxAlternatives = 1;
+
+recognition.onresult = async (event) => {
+  for (let i = event.resultIndex; i < event.results.length; i += 1) {
+    const result = event.results[i];
+    const text = result[0].transcript.trim();
+
+    if (result.isFinal && text) {
+      await window.voiceAssistant.submitText(text);
+    } else {
+      renderPartial(text); // Только отображение, без выполнения команды.
+    }
+  }
+};
+
+recognition.onerror = (event) => renderRecognitionError(event.error);
+document.querySelector("#listen").addEventListener("click", () => {
+  recognition.start();
+});
+```
+
+Native bridge кодирует вызов как обычный IPC-запрос:
+
+```json
+{
+  "protocol_version": 6,
+  "request_id": "web-speech-1",
+  "payload": {
+    "type": "submit_text",
+    "text": "открой блокнот"
+  }
+}
+```
+
+Отправляйте в ядро только результаты с `isFinal === true`, иначе одна фраза
+может выполнить команду несколько раз. `submit_text` принимает непустой UTF-8
+текст размером до 4096 байт; дальше действуют обычные сопоставление команд,
+allowlist, оценка риска, подтверждение и timeout. Значение confidence браузера
+не является границей безопасности.
+
+Поддержка Web Speech API зависит от браузера. В некоторых реализациях аудио
+отправляется во внешний облачный сервис, поэтому офлайн-работа и приватность не
+гарантируются. Запрашивайте доступ к микрофону из GUI по явному действию
+пользователя, показывайте ошибки распознавания и оставляйте локальный
+`sherpa-onnx` основным вариантом для офлайн-сценариев. Актуальную совместимость
+проверяйте в документации [SpeechRecognition](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition)
+и [`isFinal`](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognitionResult/isFinal).
 
 Pipe по умолчанию: `\\.\pipe\voice-assistant-core`. Сервер допускает только
 локальных клиентов, защищён DACL и разрешает один daemon на pipe. Каждый JSON
@@ -186,7 +268,8 @@ prefix и применяет те же risk, confirmation и timeout rules.
 необязательными параметрами. `HealthSnapshot.components` сообщает состояние
 `ready/recovering/faulted/stopped` и число автоматических перезапусков.
 
-Поток событий публикует `audio_level { rms }` не чаще 10 раз в секунду и
+Поток событий публикует изменившиеся `transcript_partial { text, confidence }`,
+финальный `transcript_ready`, `audio_level { rms }` не чаще 10 раз в секунду и
 `transcript_unavailable { reason }`. Причины: `wake_word_not_detected`,
 `too_short`, `silence`, `model_unavailable`. `audio.device_id` не может быть
 пустым; для системного input используется значение `default`.
@@ -269,6 +352,25 @@ level = "35"
 конфигурации и проверяются через allowlist; распознанный текст не становится
 URL, координатой или уровнем громкости.
 
+Однословные типизированные слоты задаются в шаблоне как `{name}`. Текстовый слот
+обязан иметь allowlist `values`, целочисленный — границы `min`/`max`; после
+подстановки значение повторно проверяется handler-ом:
+
+```toml
+[[commands]]
+id = "set_volume_voice"
+phrases = ["установи громкость {level}"]
+handler = "set_volume"
+
+[commands.slots.level]
+type = "integer"
+min = 0
+max = 100
+
+[commands.parameters]
+level = "{level}"
+```
+
 Распознанный текст никогда не исполняется как `cmd.exe` или PowerShell.
 Обработчик получает только проверенный `CommandConfig`. Для команд с
 подтверждением событие содержит одноразовый `confirmation_id`; именно его надо
@@ -281,9 +383,18 @@ URL, координатой или уровнем громкости.
 [policy]
 confirmations_enabled = false
 confirmation_timeout_ms = 15000
+voice_confirmations_enabled = true
+confirmation_accept_phrases = ["да", "подтверждаю"]
+confirmation_cancel_phrases = ["нет", "отмена"]
+handler_rate_limit_ms = 500
+handler_failure_threshold = 3
+handler_circuit_breaker_ms = 30000
 ```
 
-Это осознанное снижение защиты и должно включаться приложением явно.
+При ожидании подтверждения пользователь снова произносит wake word, затем одну
+из accept/cancel-фраз. Rate limit действует между запусками одного handler;
+после заданного числа последовательных ошибок circuit breaker временно отклоняет
+его вызовы. `confirmations_enabled = false` — осознанное снижение защиты.
 
 ## Модели
 
@@ -299,7 +410,7 @@ cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
 Пример: offline STT и отдельная streaming-модель для wake word:
 
 ```toml
-schema_version = 5
+schema_version = 6
 
 [inference]
 model = "alphacep/vosk-model-small-ru"
@@ -375,12 +486,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo run -p assistant-cli -- record --seconds 5 --output command.wav
 cargo run -p assistant-cli -- transcribe command.wav
 cargo run -p assistant-cli -- test-wake-word command.wav
-cargo run -p assistant-cli -- evaluate command.wav
+cargo run -p assistant-cli -- evaluate command.wav --threads 4
 cargo run -p assistant-cli -- soak --seconds 3600
 cargo run -p assistant-cli -- handlers
 ```
 
-`evaluate` печатает KWS и полный transcript. `soak` следит за зависанием
+`evaluate` печатает KWS, полный transcript, STT latency и real-time factor.
+Для выбора `inference.threads` сравните один неизменный WAV:
+
+```powershell
+1, 2, 4, 8, 0 | ForEach-Object {
+    cargo run --release -p assistant-cli -- evaluate command.wav --threads $_
+}
+```
+
+`0` означает host parallelism; выбирайте минимальный стабильный real-time factor,
+проверяя одинаковый transcript. `soak` следит за зависанием
 callback, reconnect, потерями bounded-очереди и метриками процесса.
 
 Реальный WAV не хранится в Git. Повторяемый regression test запускается с
@@ -400,6 +521,12 @@ cargo test -p assistant-core --all-features --test real_audio -- --ignored
 
 Файл должен быть неизменным mono WAV; ожидаемый transcript фиксируется
 переменной окружения.
+
+Ручная проверка новых streaming-событий: запустите daemon с online-моделью,
+подпишитесь IPC-клиентом на events и произнесите wake word с командой. До
+`transcript_ready` должен появиться хотя бы один изменившийся
+`transcript_partial`. Для high-risk команды после `confirmation_required`
+повторите wake word и скажите «да»; handler должен стартовать ровно один раз.
 
 ## Документация и проверки
 

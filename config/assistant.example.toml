@@ -1,4 +1,4 @@
-schema_version = 5
+schema_version = 6
 
 [audio]
 # Non-empty backend device ID, or "default" for the system input device.
@@ -40,6 +40,12 @@ restart_backoff_ms = 500
 # without confirmation.
 confirmations_enabled = true
 confirmation_timeout_ms = 15000
+voice_confirmations_enabled = true
+confirmation_accept_phrases = ["да", "подтверждаю"]
+confirmation_cancel_phrases = ["нет", "отмена"]
+handler_rate_limit_ms = 500
+handler_failure_threshold = 3
+handler_circuit_breaker_ms = 30000
 
 [ipc]
 pipe_name = "voice-assistant-core"
@@ -56,6 +62,23 @@ timeout_ms = 10000
 
 [commands.parameters]
 executable = "notepad.exe"
+
+[[commands]]
+id = "set_volume_voice"
+enabled = true
+phrases = ["установи громкость {level}"]
+handler = "set_volume"
+risk = "low"
+requires_confirmation = false
+timeout_ms = 10000
+
+[commands.slots.level]
+type = "integer"
+min = 0
+max = 100
+
+[commands.parameters]
+level = "{level}"
 
 # Disabled example of an ordered command. delay_ms is applied before its action.
 # click_mouse always requires risk = "high" and moves the cursor smoothly.

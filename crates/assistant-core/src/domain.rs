@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::audio::AudioDeviceInfo;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -180,8 +180,9 @@ impl AssistantState {
                 )
                 | (
                     AwaitingConfirmation,
-                    ExecutingCommand | Cooldown | Recovering
+                    CapturingCommand | ExecutingCommand | Cooldown | Recovering
                 )
+                | (Transcribing, AwaitingConfirmation)
                 | (ExecutingCommand, Cooldown | Recovering)
                 | (Cooldown, IdleListening | Suspended)
                 | (Suspended, IdleListening | ShuttingDown)
@@ -205,6 +206,13 @@ pub enum AssistantEvent {
     /// STT produced a transcript.
     TranscriptReady {
         /// Normalized recognizer output.
+        text: String,
+        /// Optional recognizer confidence.
+        confidence: Option<f32>,
+    },
+    /// Streaming STT produced a non-final transcript update.
+    TranscriptPartial {
+        /// Current normalized recognizer output.
         text: String,
         /// Optional recognizer confidence.
         confidence: Option<f32>,
@@ -244,6 +252,11 @@ pub enum AssistantEvent {
         confirmation_id: String,
         /// Why the token was invalidated.
         reason: ConfirmationCancelReason,
+    },
+    /// Speech captured for confirmation matched neither an accept nor a cancel phrase.
+    ConfirmationUnrecognized {
+        /// Recognized confirmation text.
+        text: String,
     },
     /// Handler execution completed successfully.
     CommandFinished {
@@ -426,6 +439,15 @@ pub trait SpeechRecognizer: Send + Sync {
     /// Adds one owned mono chunk to an active incremental session.
     async fn push_stream(&self, _samples: Vec<f32>) -> Result<(), CoreError> {
         Ok(())
+    }
+
+    /// Adds a chunk and returns a changed non-final hypothesis when supported.
+    async fn push_stream_partial(
+        &self,
+        samples: Vec<f32>,
+    ) -> Result<Option<Transcript>, CoreError> {
+        self.push_stream(samples).await?;
+        Ok(None)
     }
 
     /// Finishes an incremental session, falling back to the complete request by default.

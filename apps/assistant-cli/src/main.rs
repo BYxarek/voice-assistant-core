@@ -64,6 +64,9 @@ enum CliCommand {
         input: PathBuf,
         #[arg(long)]
         model: Option<PathBuf>,
+        /// Native inference threads; zero selects host parallelism.
+        #[arg(long, default_value_t = 0)]
+        threads: i32,
     },
 }
 
@@ -315,7 +318,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "stt-sherpa-onnx")]
-        CliCommand::Evaluate { input, model } => {
+        CliCommand::Evaluate {
+            input,
+            model,
+            threads,
+        } => {
             use assistant_core::{
                 SpeechRecognizer, audio::read_wav_mono, stt::SherpaOnnxRecognizer,
                 wakeword::SherpaWakeWordDetector,
@@ -343,20 +350,31 @@ async fn main() -> anyhow::Result<()> {
             let wake_word = samples
                 .chunks((sample_rate / 50) as usize)
                 .find_map(|frame| detector.process(frame));
-            let transcript = SherpaOnnxRecognizer::new_for_model(
+            anyhow::ensure!((0..=64).contains(&threads), "threads must be within 0..=64");
+            let recognizer = SherpaOnnxRecognizer::new_for_model(
                 model,
                 stt_spec,
-                config.inference.threads,
+                threads,
                 config.inference.queue_capacity,
                 CoreMetrics::default(),
-            )?
-            .transcribe(TranscriptionRequest {
-                samples,
-                sample_rate,
-            })
-            .await?;
+            )?;
+            let audio_seconds = samples.len() as f64 / f64::from(sample_rate);
+            let started = std::time::Instant::now();
+            let transcript = recognizer
+                .transcribe(TranscriptionRequest {
+                    samples,
+                    sample_rate,
+                })
+                .await?;
+            let elapsed = started.elapsed();
             println!("wake_word={wake_word:?}");
             println!("transcript={}", transcript.text);
+            println!(
+                "threads={} stt_ms={} real_time_factor={:.3}",
+                assistant_core::stt::effective_threads(threads),
+                elapsed.as_millis(),
+                elapsed.as_secs_f64() / audio_seconds
+            );
         }
     }
     Ok(())

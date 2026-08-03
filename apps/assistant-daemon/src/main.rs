@@ -15,7 +15,7 @@ use assistant_core::{
     RuntimeUpdate, SpeechRecognizer, TranscriptUnavailableReason, TranscriptionRequest,
     UnavailableRecognizer,
     audio::{
-        AudioDeviceInfo, AudioInput, default_input_device, list_input_devices, resample_linear,
+        AudioDeviceInfo, AudioInput, default_input_device, list_input_devices, resample_linear_into,
     },
     builtin_handlers,
     config::CURRENT_CONFIG_VERSION,
@@ -102,6 +102,7 @@ const MANUAL_CAPTURE_RESERVING: u8 = 1;
 const MANUAL_CAPTURE_BEGIN: u8 = 2;
 const MANUAL_CAPTURE_ACTIVE: u8 = 3;
 const MANUAL_CAPTURE_FINISH: u8 = 4;
+const STREAMING_STT_CHUNK_MS: u32 = 100;
 
 #[derive(Default)]
 struct MissedWakeWord {
@@ -792,11 +793,7 @@ fn install_configured_models(
 async fn initialize_stt(context: DaemonContext) {
     let config = current_config(&context);
     let resolved = match config {
-        Ok(config) => {
-            let stt = resolve_model(&context, config.inference.model.clone()).await;
-            let wake = resolve_model(&context, config.wake_word.model.clone()).await;
-            stt.and_then(|stt| wake.map(|wake| (stt, wake)))
-        }
+        Ok(config) => resolve_configured_models(&context, &config).await,
         Err(error) => Err(error),
     };
     match resolved {
@@ -841,6 +838,22 @@ async fn resolve_model(context: &DaemonContext, model_id: String) -> Result<Path
         .await
         .map_err(|_| "model resolver stopped".to_string())?
         .map_err(|error| error.to_string())
+}
+
+async fn resolve_configured_models(
+    context: &DaemonContext,
+    config: &CoreConfig,
+) -> Result<(PathBuf, PathBuf), String> {
+    let stt = resolve_model(context, config.inference.model.clone()).await?;
+    if models_are_shared(config) {
+        return Ok((stt.clone(), stt));
+    }
+    let wake = resolve_model(context, config.wake_word.model.clone()).await?;
+    Ok((stt, wake))
+}
+
+fn models_are_shared(config: &CoreConfig) -> bool {
+    config.inference.model == config.wake_word.model
 }
 
 async fn load_stt_recognizer(
@@ -961,8 +974,7 @@ async fn activate_model(
 
 async fn verify_model(context: &DaemonContext) -> Result<ModelStatus, String> {
     let config = current_config(context)?;
-    let stt = resolve_model(context, config.inference.model.clone()).await?;
-    let wake = resolve_model(context, config.wake_word.model.clone()).await?;
+    let (stt, wake) = resolve_configured_models(context, &config).await?;
     activate_model(context, stt, wake).await?;
     Ok(current_model_status(context))
 }
@@ -1441,7 +1453,10 @@ fn audio_session(
     ready.store(true, Ordering::Release);
     let target_rate = config.audio.target_sample_rate;
     let frame_samples = samples_for_ms(target_rate, config.audio.frame_ms);
+    let stream_chunk_samples = samples_for_ms(target_rate, STREAMING_STT_CHUNK_MS);
     let mut buffered = VecDeque::new();
+    let mut frame = Vec::with_capacity(frame_samples);
+    let mut stream_buffer = Vec::with_capacity(stream_chunk_samples);
     let mut pipeline = CommandAudioPipeline::new(
         EnergyVad::new(config.audio.vad_threshold),
         samples_for_ms(target_rate, config.audio.pre_roll_ms),
@@ -1454,6 +1469,7 @@ fn audio_session(
     let mut last_device_check = Instant::now();
     let mut last_level = Instant::now() - Duration::from_millis(100);
     let mut missed_wake_word = MissedWakeWord::default();
+    let mut processing_audio = true;
 
     while !stopping.load(Ordering::Acquire) {
         if generation.load(Ordering::Acquire) != expected_generation {
@@ -1499,22 +1515,29 @@ fn audio_session(
             continue;
         };
         last_audio = Instant::now();
-        // ponytail: replace this bounded blockwise resampler only when real WAV evaluation
-        // demonstrates a measurable KWS/STT regression.
-        buffered.extend(resample_linear(&block, input.source_rate(), target_rate));
-        while buffered.len() >= frame_samples {
-            let frame: Vec<f32> = buffered.drain(..frame_samples).collect();
-            let frame_rms = rms(&frame);
-            if last_level.elapsed() >= Duration::from_millis(100) {
-                let _ = commands.try_send(PipelineMessage::AudioLevel(frame_rms));
-                last_level = Instant::now();
-            }
-            if !listening.load(Ordering::Acquire) {
+        if !listening.load(Ordering::Acquire) {
+            if processing_audio {
+                buffered.clear();
+                stream_buffer.clear();
                 pipeline.reset();
                 detector.reset();
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 missed_wake_word.reset();
-                continue;
+                processing_audio = false;
+            }
+            continue;
+        }
+        processing_audio = true;
+        // ponytail: replace this bounded blockwise resampler only when real WAV evaluation
+        // demonstrates a measurable KWS/STT regression.
+        resample_linear_into(&block, input.source_rate(), target_rate, &mut buffered);
+        while buffered.len() >= frame_samples {
+            frame.clear();
+            frame.extend(buffered.drain(..frame_samples));
+            let frame_rms = rms(&frame);
+            if last_level.elapsed() >= Duration::from_millis(100) {
+                let _ = commands.try_send(PipelineMessage::AudioLevel(frame_rms));
+                last_level = Instant::now();
             }
             let manual_state = manual_capture.load(Ordering::Acquire);
             if manual_state == MANUAL_CAPTURE_BEGIN {
@@ -1539,6 +1562,7 @@ fn audio_session(
                 }
                 let captured = pipeline.finish();
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
+                flush_stream_chunk(commands, &mut stream_buffer, stream_chunk_samples)?;
                 let message = match captured {
                     None => {
                         PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::TooShort)
@@ -1594,12 +1618,14 @@ fn audio_session(
             let was_collecting = pipeline.is_collecting();
             let completed = pipeline.push(&frame, detected);
             if detected || was_collecting {
-                commands
-                    .blocking_send(PipelineMessage::StreamChunk(frame))
-                    .map_err(|_| "runtime command queue closed".to_string())?;
+                stream_buffer.extend_from_slice(&frame);
+                if stream_buffer.len() >= stream_chunk_samples {
+                    flush_stream_chunk(commands, &mut stream_buffer, stream_chunk_samples)?;
+                }
             }
             if let Some(samples) = completed {
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
+                flush_stream_chunk(commands, &mut stream_buffer, stream_chunk_samples)?;
                 let message = if was_manual && rms(&samples) < config.audio.vad_threshold {
                     PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)
                 } else {
@@ -1618,6 +1644,20 @@ fn audio_session(
     }
     ready.store(false, Ordering::Release);
     Ok(SessionEnd::Stopped)
+}
+
+fn flush_stream_chunk(
+    commands: &mpsc::Sender<PipelineMessage>,
+    buffered: &mut Vec<f32>,
+    capacity: usize,
+) -> Result<(), String> {
+    if buffered.is_empty() {
+        return Ok(());
+    }
+    let samples = std::mem::replace(buffered, Vec::with_capacity(capacity));
+    commands
+        .blocking_send(PipelineMessage::StreamChunk(samples))
+        .map_err(|_| "runtime command queue closed".to_string())
 }
 
 fn should_reopen_audio(
@@ -1726,5 +1766,26 @@ mod tests {
         let mut threads = old.clone();
         threads.inference.threads += 1;
         assert!(inference_worker_changed(&old, &threads));
+    }
+
+    #[test]
+    fn identical_stt_and_wake_models_share_verification() {
+        let mut config = CoreConfig::bundled_example().unwrap();
+        config.wake_word.model.clone_from(&config.inference.model);
+        assert!(models_are_shared(&config));
+        config.wake_word.model.push_str("-other");
+        assert!(!models_are_shared(&config));
+    }
+
+    #[test]
+    fn streaming_samples_are_flushed_as_one_batch() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let mut samples = vec![0.1, 0.2, 0.3];
+        flush_stream_chunk(&sender, &mut samples, 8).unwrap();
+        assert!(samples.is_empty());
+        match receiver.try_recv().unwrap() {
+            PipelineMessage::StreamChunk(samples) => assert_eq!(samples.len(), 3),
+            _ => panic!("unexpected pipeline message"),
+        }
     }
 }

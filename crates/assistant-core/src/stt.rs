@@ -31,7 +31,7 @@ enum RecognitionJob {
     },
     Push {
         samples: Vec<f32>,
-        response: oneshot::Sender<Result<(), CoreError>>,
+        response: oneshot::Sender<Result<Option<Transcript>, CoreError>>,
     },
     Finish {
         response: oneshot::Sender<Result<Transcript, CoreError>>,
@@ -228,6 +228,14 @@ impl SpeechRecognizer for SherpaOnnxRecognizer {
     }
 
     async fn push_stream(&self, samples: Vec<f32>) -> Result<(), CoreError> {
+        let _ = self.push_stream_partial(samples).await?;
+        Ok(())
+    }
+
+    async fn push_stream_partial(
+        &self,
+        samples: Vec<f32>,
+    ) -> Result<Option<Transcript>, CoreError> {
         if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
             return Err(CoreError::Recognition(
                 "stream chunk must contain finite samples".into(),
@@ -388,9 +396,10 @@ fn online_worker_loop(
                 let result = streaming
                     .as_ref()
                     .ok_or_else(|| CoreError::Recognition("no STT stream is active".into()))
-                    .map(|(stream, sample_rate)| {
+                    .and_then(|(stream, sample_rate)| {
                         stream.accept_waveform(*sample_rate, &samples);
                         decode_ready(&recognizer, stream);
+                        partial(&recognizer, stream)
                     });
                 let _ = response.send(result);
             }
@@ -417,7 +426,12 @@ fn offline_worker_loop(
                 metrics.stt_dequeued();
                 let _ = response.send(recognize_offline(&recognizer, request));
             }
-            RecognitionJob::Begin { response, .. } | RecognitionJob::Push { response, .. } => {
+            RecognitionJob::Begin { response, .. } => {
+                let _ = response.send(Err(CoreError::Recognition(
+                    "offline STT does not accept streaming jobs".into(),
+                )));
+            }
+            RecognitionJob::Push { response, .. } => {
                 let _ = response.send(Err(CoreError::Recognition(
                     "offline STT does not accept streaming jobs".into(),
                 )));
@@ -572,6 +586,18 @@ fn decode_ready(recognizer: &OnlineRecognizer, stream: &OnlineStream) {
     while recognizer.is_ready(stream) {
         recognizer.decode(stream);
     }
+}
+
+fn partial(
+    recognizer: &OnlineRecognizer,
+    stream: &OnlineStream,
+) -> Result<Option<Transcript>, CoreError> {
+    Ok(recognizer.get_result(stream).and_then(|result| {
+        (!result.text.trim().is_empty()).then_some(Transcript {
+            text: result.text,
+            confidence: None,
+        })
+    }))
 }
 
 fn finish(recognizer: &OnlineRecognizer, stream: OnlineStream) -> Result<Transcript, CoreError> {

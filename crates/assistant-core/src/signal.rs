@@ -85,6 +85,11 @@ impl AudioRingBuffer {
         }
     }
 
+    /// Removes retained samples without releasing the preallocated storage.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
     /// Copies retained samples in chronological order.
     pub fn snapshot(&self) -> Vec<f32> {
         self.samples.iter().copied().collect()
@@ -181,7 +186,7 @@ impl<V: VoiceActivityDetector> CommandAudioPipeline<V> {
     /// Clears pre-roll, active capture and detector state.
     pub fn reset(&mut self) {
         self.collector = None;
-        self.ring = AudioRingBuffer::new(self.pre_roll_samples);
+        self.ring.clear();
         self.vad.reset();
     }
 }
@@ -238,6 +243,15 @@ mod tests {
         ring.push(&[1.0, 2.0]);
         ring.push(&[3.0, 4.0]);
         assert_eq!(ring.snapshot(), vec![2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cleared_ring_reuses_empty_state() {
+        let mut ring = AudioRingBuffer::new(3);
+        ring.push(&[1.0, 2.0, 3.0]);
+        ring.clear();
+        ring.push(&[4.0, 5.0]);
+        assert_eq!(ring.snapshot(), vec![4.0, 5.0]);
     }
 
     #[test]

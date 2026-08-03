@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Voice Assistant Core — публичный API и руководство">
-  <title>Voice Assistant Core · API v4</title>
+  <title>Voice Assistant Core · API v5</title>
   <style>
     :root{color-scheme:dark;--bg:#09111e;--panel:#111d30;--text:#eef5ff;--muted:#a7b5ca;--line:#2b405e;--accent:#67d9ff}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 Segoe UI,system-ui,sans-serif}
@@ -25,7 +25,7 @@
     <a href="#architecture">Архитектура</a>
     <a href="#api">Публичный Rust API</a>
     <a href="#extension">Extension API</a>
-    <a href="#ipc">IPC v3</a>
+    <a href="#ipc">IPC v6</a>
     <a href="#config">Конфигурация</a>
     <a href="#models">Модели</a>
     <a href="#diagnostics">Диагностика</a>
@@ -33,8 +33,8 @@
   </nav>
   <main>
     <h1>Voice Assistant Core</h1>
-    <p>Voice Assistant Core <strong>1.3.0</strong> — локальное Windows-ядро с
-      versioned IPC и стабильным Rust extension API v4.
+    <p>Voice Assistant Core <strong>1.5.0</strong> — локальное Windows-ядро с
+      versioned IPC и стабильным Rust extension API v5.
       GUI, аудио, inference и типизированные команды разделены явными границами.</p>
     <p><a href="rustdoc/assistant_core/index.html">Открыть опубликованный Rustdoc</a>.
       Локально после <code>cargo doc --workspace --all-features --no-deps</code>
@@ -60,14 +60,16 @@ cargo run -p assistant-cli -- status</code></pre>
 
     <h2 id="architecture">Архитектура</h2>
     <pre><code>GUI / CLI
-    → Named Pipe protocol v5
+    → Named Pipe protocol v6
     → Runtime task
     → Audio / KWS / VAD / STT / Commands</code></pre>
     <p>Audio callback выполняет только преобразование кадров и неблокирующую
       запись в bounded-очередь. KWS, STT, файловые операции и handlers работают
-      вне callback. Текущие состояние и health читаются без ожидания inference.</p>
+      вне callback. В <code>Starting</code>/<code>Suspended</code> audio worker не запускает
+      resample, VAD или inference; streaming STT получает 100-мс батчи. Текущие
+      состояние и health читаются без ожидания inference.</p>
 
-    <h2 id="api">Публичный Rust API v4</h2>
+    <h2 id="api">Публичный Rust API v5</h2>
     <table>
       <tr><th>Граница</th><th>Типы</th></tr>
       <tr><td>Extensions</td><td><code>CommandHandler</code>, <code>HandlerSchema</code>, <code>HandlerRegistry</code></td></tr>
@@ -75,7 +77,8 @@ cargo run -p assistant-cli -- status</code></pre>
       <tr><td>IPC client</td><td><code>CoreIpcClient</code>, <code>EventSubscription</code>, request/response/envelope/error types</td></tr>
       <tr><td>Domain</td><td>config, states, events, health, model status, typed errors and metrics</td></tr>
     </table>
-    <p><code>CORE_API_VERSION = 4</code>. Ломающие Rust-изменения требуют новой
+    <p><code>CORE_API_VERSION = 5</code>. API включает typed command slots и
+      <code>SpeechRecognizer::push_stream_partial</code>. Ломающие Rust-изменения требуют новой
       major-версии API. Несовместимое изменение wire-формата требует новой
       <code>PROTOCOL_VERSION</code>.</p>
 
@@ -102,7 +105,53 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       неизвестные, пропущенные и лишние параметры до запуска runtime.
       Распознанный текст не передаётся в shell.</p>
 
-    <h2 id="ipc">IPC protocol v5</h2>
+    <h2 id="ipc">IPC protocol v6</h2>
+    <h3>Web Speech API как внешний STT</h3>
+    <p>Web Speech API подключается без изменения ядра и протокола: браузерный <code>SpeechRecognition</code> передаёт финальный текст через native bridge GUI в существующий запрос <code>submit_text</code>.</p>
+    <pre><code>SpeechRecognition → native bridge GUI → Windows named pipe
+                  → CoreRequest::SubmitText → команды и policy ядра</code></pre>
+    <p>Обычная веб-страница не может напрямую открыть Windows named pipe. В WebView2, Tauri или Electron предоставьте узкий bridge <code>window.voiceAssistant.submitText(text)</code>. Он должен разрешать только отправку текста и не давать web-контенту доступ к shell или произвольным IPC-запросам.</p>
+    <pre><code>const Recognition =
+  window.SpeechRecognition ?? window.webkitSpeechRecognition;
+
+if (!Recognition) {
+  throw new Error("Web Speech API недоступен в этом браузере");
+}
+
+const recognition = new Recognition();
+recognition.lang = "ru-RU";
+recognition.continuous = false;
+recognition.interimResults = true;
+recognition.maxAlternatives = 1;
+
+recognition.onresult = async (event) =&gt; {
+  for (let i = event.resultIndex; i &lt; event.results.length; i += 1) {
+    const result = event.results[i];
+    const text = result[0].transcript.trim();
+
+    if (result.isFinal &amp;&amp; text) {
+      await window.voiceAssistant.submitText(text);
+    } else {
+      renderPartial(text); // Только отображение, без выполнения команды.
+    }
+  }
+};
+
+recognition.onerror = (event) =&gt; renderRecognitionError(event.error);
+document.querySelector("#listen").addEventListener("click", () =&gt; {
+  recognition.start();
+});</code></pre>
+    <p>Native bridge отправляет существующий IPC-запрос:</p>
+    <pre><code>{
+  "protocol_version": 6,
+  "request_id": "web-speech-1",
+  "payload": {
+    "type": "submit_text",
+    "text": "открой блокнот"
+  }
+}</code></pre>
+    <p>Передавайте только результаты с <code>isFinal === true</code>: промежуточные варианты предназначены для интерфейса и могут привести к повторному выполнению команды. Ядро принимает непустой UTF-8 текст до 4096 байт и применяет обычные allowlist, оценку риска, подтверждение и timeout. Confidence браузера не является границей безопасности.</p>
+    <p><code>SpeechRecognition</code> поддерживается не всеми браузерами; некоторые реализации отправляют аудио во внешний облачный сервис и не работают офлайн. Разрешение на микрофон, отображение состояния и обработка ошибок относятся к GUI. Для приватного офлайн-сценария используйте локальный <code>sherpa-onnx</code> как основной вариант или fallback. См. <a href="https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition">SpeechRecognition</a> и <a href="https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognitionResult/isFinal">SpeechRecognitionResult.isFinal</a>.</p>
     <p><code>\\.\pipe\voice-assistant-core</code>, local-only DACL, один daemon,
       JSON envelope с <code>protocol_version</code> и лимитом 1 МиБ.</p>
     <p>API включает health/status/config/metrics/audio devices/handler schemas, validate/apply
@@ -117,7 +166,8 @@ handlers.register(Arc::new(Mute))?;</code></pre>
     <p>IPC начинает обслуживать GUI до загрузки STT: состояние остаётся
       <code>Starting</code>, а <code>ModelStatus::Loading</code> и
       <code>ModelLoadProgress</code> сообщают этап и процент загрузки.</p>
-    <p>GUI получает <code>audio_level { rms }</code> не чаще 10 раз в секунду и
+    <p>GUI получает изменившийся <code>transcript_partial { text, confidence }</code>,
+      финальный <code>transcript_ready</code>, <code>audio_level { rms }</code> не чаще 10 раз в секунду и
       <code>transcript_unavailable { reason }</code> с причинами
       <code>wake_word_not_detected</code>, <code>too_short</code>, <code>silence</code>
       или <code>model_unavailable</code>. Пустой <code>audio.device_id</code> отклоняется.</p>
@@ -135,7 +185,7 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       runtime, model и IPC вместе со счётчиками перезапусков.</p>
 
     <h2 id="config">Конфигурация</h2>
-    <p>Текущая schema — 5; schema 1–4 мигрируются автоматически. Изменение
+    <p>Текущая schema — 6; schema 1–5 мигрируются автоматически. Изменение
       проверяется вместе с зарегистрированными handlers и сохраняется атомарно.
       Runtime дифференциально меняет только затронутые компоненты; команды,
       подтверждения и микрофон не перезагружают STT.
@@ -146,7 +196,7 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       <code>inference.threads = 0</code> выбирает host parallelism, а
       <code>max_restarts</code>/<code>restart_backoff_ms</code> ограничивают
       автоматическое восстановление STT.</p>
-    <pre><code>schema_version = 5
+    <pre><code>schema_version = 6
 
 [inference]
 model = "alphacep/vosk-model-small-ru"
@@ -156,6 +206,13 @@ threads = 0
 model = "alphacep/vosk-model-streaming-ru"
 keyword = "ассистент"
 aliases = ["помощник"]</code></pre>
+    <pre><code>[policy]
+voice_confirmations_enabled = true
+confirmation_accept_phrases = ["да", "подтверждаю"]
+confirmation_cancel_phrases = ["нет", "отмена"]
+handler_rate_limit_ms = 500
+handler_failure_threshold = 3
+handler_circuit_breaker_ms = 30000</code></pre>
     <div class="note"><code>policy.confirmations_enabled = false</code> полностью
       отключает подтверждения, включая high-risk команды. Это явное снижение
       защиты.</div>
@@ -185,6 +242,24 @@ handler = "set_volume"
 delay_ms = 500
 [commands.actions.parameters]
 level = "35"</code></pre>
+    <p>Фраза может содержать однословный typed slot. Text-слоты имеют явный
+      allowlist, integer-слоты — обязательные inclusive bounds; подставленное
+      значение повторно проверяется handler-ом.</p>
+    <pre><code>[[commands]]
+id = "set_volume_voice"
+phrases = ["установи громкость {level}"]
+handler = "set_volume"
+
+[commands.slots.level]
+type = "integer"
+min = 0
+max = 100
+
+[commands.parameters]
+level = "{level}"</code></pre>
+    <p>Во время pending confirmation повторный wake word открывает короткий STT-захват
+      для accept/cancel-фразы. Rate limit ограничивает частоту запусков одного handler;
+      circuit breaker временно блокирует его после последовательных ошибок.</p>
 
     <h2 id="models">Модели</h2>
     <p>Встроенный pinned-каталог поддерживает семь моделей <code>alphacep/vosk-model*</code>
@@ -207,11 +282,15 @@ cargo run -p assistant-cli -- transcribe .\command.wav</code></pre>
 
     <h2 id="diagnostics">Диагностика и готовность</h2>
     <pre><code>cargo run -p assistant-cli -- handlers
-cargo run -p assistant-cli -- evaluate command.wav
+cargo run --release -p assistant-cli -- evaluate command.wav --threads 4
 cargo run -p assistant-cli -- soak --seconds 3600
 cargo test --workspace --all-features
 $env:RUSTDOCFLAGS="-D warnings"
 cargo doc --workspace --all-features --no-deps</code></pre>
+    <p><code>evaluate</code> печатает STT latency и real-time factor. Один и тот же
+      WAV следует прогнать с <code>--threads 1</code>, <code>2</code>, <code>4</code>,
+      <code>8</code> и <code>0</code> (host parallelism), затем выбрать самый быстрый
+      вариант со стабильным transcript.</p>
     <p><code>cargo test --workspace --all-features</code> включает автоматический
       процессный E2E-тест: запускает настоящий <code>assistant-daemon</code>,
       подключает <code>CoreIpcClient</code>, проверяет health, suspend/resume и

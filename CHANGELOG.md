@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.5.0] — 2026-08-03
+
+### Производительность
+
+- audio worker пропускает resample/VAD/KWS в `Starting` и `Suspended`, переиспользует
+  frame/pre-roll буферы и передаёт streaming STT 100-мс батчами;
+- одна модель, выбранная одновременно для STT и KWS, проходит SHA-256 resolve один раз;
+- `assistant-cli evaluate --threads` выводит STT latency и real-time factor для подбора
+  числа native inference threads на фиксированном WAV.
+
+### Добавлено
+
+- изменившиеся partial-транскрипты streaming STT в IPC events;
+- однословные типизированные command slots с bounds/allowlist и безопасной подстановкой;
+- голосовое подтверждение и отмена pending-команд после повторного wake word;
+- общий per-handler rate limit и circuit breaker последовательных ошибок;
+- документация интеграции Web Speech API через `submit_text`;
+- английская локализация README с переключателем языка.
+
+### Изменено
+
+- конфигурация увеличена до schema v6, публичный Rust API — до v5, IPC — до
+  protocol v6.
+
 ## [1.4.0] — 2026-08-02
 
 ### Добавлено
@@ -110,3 +134,4 @@
 [1.2.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.2.0
 [1.3.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.3.0
 [1.4.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.4.0
+[1.5.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.0

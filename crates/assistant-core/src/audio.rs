@@ -318,34 +318,67 @@ pub fn read_wav_mono(path: impl AsRef<Path>) -> Result<(Vec<f32>, u32), AudioErr
     Ok((samples, spec.sample_rate))
 }
 
-fn downmix(samples: impl Iterator<Item = f32>, channels: usize) -> Vec<f32> {
-    let samples: Vec<_> = samples.collect();
-    samples
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
+fn downmix(mut samples: impl Iterator<Item = f32>, channels: usize) -> Vec<f32> {
+    let mut mono = Vec::with_capacity(samples.size_hint().0 / channels);
+    let scale = 1.0 / channels as f32;
+    loop {
+        let mut sum = 0.0;
+        for _ in 0..channels {
+            let Some(sample) = samples.next() else {
+                return mono;
+            };
+            sum += sample;
+        }
+        mono.push(sum * scale);
+    }
 }
 
 /// Resamples mono samples using bounded linear interpolation.
 pub fn resample_linear(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
-    if samples.is_empty() || source_rate == target_rate {
-        return samples.to_vec();
+    let output_len = resampled_len(samples.len(), source_rate, target_rate);
+    let mut output = Vec::with_capacity(output_len);
+    resample_linear_into(samples, source_rate, target_rate, &mut output);
+    output
+}
+
+/// Appends linearly resampled mono samples to an existing queue without a temporary buffer.
+pub fn resample_linear_into(
+    samples: &[f32],
+    source_rate: u32,
+    target_rate: u32,
+    output: &mut impl Extend<f32>,
+) {
+    if samples.is_empty() {
+        return;
     }
-    let output_len = (samples.len() as u64 * target_rate as u64 / source_rate as u64) as usize;
-    (0..output_len)
-        .map(|i| {
+    if source_rate == target_rate {
+        output.extend(samples.iter().copied());
+        return;
+    }
+    output.extend(
+        (0..resampled_len(samples.len(), source_rate, target_rate)).map(|i| {
             let position = i as f64 * source_rate as f64 / target_rate as f64;
             let left = position.floor() as usize;
             let right = (left + 1).min(samples.len() - 1);
             let fraction = (position - left as f64) as f32;
             samples[left] * (1.0 - fraction) + samples[right] * fraction
-        })
-        .collect()
+        }),
+    );
+}
+
+fn resampled_len(samples: usize, source_rate: u32, target_rate: u32) -> usize {
+    if source_rate == target_rate {
+        samples
+    } else {
+        (samples as u64 * target_rate as u64 / source_rate as u64) as usize
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resample_linear;
+    use std::collections::VecDeque;
+
+    use super::{resample_linear, resample_linear_into};
 
     #[test]
     fn resampling_preserves_duration() {
@@ -357,5 +390,13 @@ mod tests {
             assert_eq!(output.len(), 16_000);
             assert!(output.iter().all(|sample| sample.is_finite()));
         }
+    }
+
+    #[test]
+    fn resampling_appends_without_replacing_buffered_samples() {
+        let mut output = VecDeque::from([9.0]);
+        resample_linear_into(&[0.0, 1.0], 2, 4, &mut output);
+        assert_eq!(output.len(), 5);
+        assert_eq!(output.front(), Some(&9.0));
     }
 }

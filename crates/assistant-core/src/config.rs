@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::commands::{HandlerRegistry, normalize};
 
 /// Current on-disk and IPC configuration schema.
-pub const CURRENT_CONFIG_VERSION: u16 = 5;
+pub const CURRENT_CONFIG_VERSION: u16 = 6;
 
 /// Default pinned Alphacep model used for both STT and wake-word detection.
 pub const DEFAULT_MODEL_ID: &str = "alphacep/vosk-model-streaming-ru";
@@ -177,6 +177,18 @@ pub struct PolicyConfig {
     pub confirmations_enabled: bool,
     /// Lifetime of one pending confirmation.
     pub confirmation_timeout_ms: u64,
+    /// Whether a pending invocation accepts speech after another wake word.
+    pub voice_confirmations_enabled: bool,
+    /// Normalized phrases that confirm a pending invocation.
+    pub confirmation_accept_phrases: Vec<String>,
+    /// Normalized phrases that cancel a pending invocation.
+    pub confirmation_cancel_phrases: Vec<String>,
+    /// Minimum delay between starts of the same handler; zero disables it.
+    pub handler_rate_limit_ms: u64,
+    /// Consecutive failures that open a handler circuit; zero disables it.
+    pub handler_failure_threshold: u32,
+    /// Delay before an open handler circuit permits a probe call.
+    pub handler_circuit_breaker_ms: u64,
 }
 
 impl Default for PolicyConfig {
@@ -184,6 +196,12 @@ impl Default for PolicyConfig {
         Self {
             confirmations_enabled: true,
             confirmation_timeout_ms: 15_000,
+            voice_confirmations_enabled: true,
+            confirmation_accept_phrases: vec!["да".into(), "подтверждаю".into()],
+            confirmation_cancel_phrases: vec!["нет".into(), "отмена".into()],
+            handler_rate_limit_ms: 0,
+            handler_failure_threshold: 3,
+            handler_circuit_breaker_ms: 30_000,
         }
     }
 }
@@ -218,6 +236,9 @@ pub struct CommandConfig {
     pub enabled: bool,
     /// Exact phrases accepted after normalization.
     pub phrases: Vec<String>,
+    /// Typed single-token slots referenced as `{name}` in phrases and parameters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub slots: std::collections::BTreeMap<String, SlotConfig>,
     /// Registered [`crate::CommandHandler`] name for a single-action command.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub handler: String,
@@ -236,6 +257,72 @@ pub struct CommandConfig {
     /// Ordered actions; mutually exclusive with `handler` and `parameters`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<CommandActionConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Runtime type used to validate one captured command slot.
+pub enum SlotType {
+    /// One normalized value from the configured allowlist.
+    Text,
+    /// A signed integer within inclusive bounds.
+    Integer,
+    /// The literal value `true` or `false`.
+    Boolean,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+/// Validation policy for one command phrase slot.
+pub struct SlotConfig {
+    /// Slot value type.
+    #[serde(rename = "type")]
+    pub value_type: SlotType,
+    /// Inclusive minimum for an integer slot.
+    #[serde(default)]
+    pub min: Option<i64>,
+    /// Inclusive maximum for an integer slot.
+    #[serde(default)]
+    pub max: Option<i64>,
+    /// Allowed normalized values for a text slot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+impl SlotConfig {
+    /// Validates and canonicalizes one recognized slot token.
+    pub fn canonicalize(&self, value: &str, normalize_yo: bool) -> Option<String> {
+        match self.value_type {
+            SlotType::Text => {
+                let value = normalize(value, normalize_yo);
+                self.values
+                    .iter()
+                    .map(|allowed| normalize(allowed, normalize_yo))
+                    .find(|allowed| *allowed == value)
+            }
+            SlotType::Integer => value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| self.min.is_none_or(|min| *value >= min))
+                .filter(|value| self.max.is_none_or(|max| *value <= max))
+                .map(|value| value.to_string()),
+            SlotType::Boolean => match value {
+                "true" | "false" => Some(value.into()),
+                _ => None,
+            },
+        }
+    }
+
+    pub(crate) fn sample(&self, normalize_yo: bool) -> Option<String> {
+        match self.value_type {
+            SlotType::Text => self
+                .values
+                .first()
+                .map(|value| normalize(value, normalize_yo)),
+            SlotType::Integer => self.min.map(|value| value.to_string()),
+            SlotType::Boolean => Some("false".into()),
+        }
+    }
 }
 
 impl CommandConfig {
@@ -355,7 +442,7 @@ impl CoreConfig {
             .and_then(toml::Value::as_integer)
             .ok_or_else(|| ConfigError::Validation("schema_version is required".into()))?;
         match version {
-            1..=4 => {
+            1..=5 => {
                 value["schema_version"] = toml::Value::Integer(CURRENT_CONFIG_VERSION.into());
             }
             version if version == i64::from(CURRENT_CONFIG_VERSION) => {}
@@ -376,7 +463,7 @@ impl CoreConfig {
     /// Migrates an IPC-supplied configuration object to the current schema.
     pub fn migrate(mut self) -> Result<Self, ConfigError> {
         match self.schema_version {
-            1..=4 => self.schema_version = CURRENT_CONFIG_VERSION,
+            1..=5 => self.schema_version = CURRENT_CONFIG_VERSION,
             CURRENT_CONFIG_VERSION => {}
             version => {
                 return Err(ConfigError::Validation(format!(
@@ -416,13 +503,9 @@ impl CoreConfig {
     pub fn validate_with_handlers(&self, handlers: &HandlerRegistry) -> Result<(), ConfigError> {
         self.validate()?;
         for command in &self.commands {
-            for action in command.resolved_actions() {
-                handlers
-                    .validate_action(&action.handler, &action.parameters)
-                    .map_err(|error| {
-                        ConfigError::Validation(format!("command {}: {error}", command.id))
-                    })?;
-            }
+            handlers.validate_command(command).map_err(|error| {
+                ConfigError::Validation(format!("command {}: {error}", command.id))
+            })?;
             if command.risk != RiskLevel::High
                 && command
                     .resolved_actions()
@@ -505,9 +588,26 @@ impl CoreConfig {
                 "inference threads, queue capacity or timeout is out of range".into(),
             ));
         }
-        if !(100..=300_000).contains(&self.policy.confirmation_timeout_ms) {
+        let mut confirmation_phrases = std::collections::HashSet::new();
+        let confirmation_phrases_valid = self
+            .policy
+            .confirmation_accept_phrases
+            .iter()
+            .chain(&self.policy.confirmation_cancel_phrases)
+            .all(|phrase| {
+                let phrase = normalize(phrase, self.matching.normalize_yo);
+                !phrase.is_empty() && confirmation_phrases.insert(phrase)
+            });
+        if !(100..=300_000).contains(&self.policy.confirmation_timeout_ms)
+            || !confirmation_phrases_valid
+            || self.policy.confirmation_accept_phrases.is_empty()
+            || self.policy.confirmation_cancel_phrases.is_empty()
+            || self.policy.handler_rate_limit_ms > 300_000
+            || self.policy.handler_failure_threshold > 100
+            || !(100..=3_600_000).contains(&self.policy.handler_circuit_breaker_ms)
+        {
             return Err(ConfigError::Validation(
-                "confirmation_timeout_ms is out of range".into(),
+                "confirmation or handler protection policy is invalid".into(),
             ));
         }
         if self.ipc.pipe_name.is_empty()
@@ -543,6 +643,44 @@ impl CoreConfig {
                     command.id
                 )));
             }
+            for (name, slot) in &command.slots {
+                let valid_name = !name.is_empty()
+                    && name.chars().all(|character| {
+                        character.is_ascii_lowercase()
+                            || character.is_ascii_digit()
+                            || character == '_'
+                    });
+                let valid_policy = match slot.value_type {
+                    SlotType::Text => {
+                        let mut values = std::collections::HashSet::new();
+                        slot.min.is_none()
+                            && slot.max.is_none()
+                            && !slot.values.is_empty()
+                            && slot.values.len() <= 256
+                            && slot.values.iter().all(|value| {
+                                let value = normalize(value, self.matching.normalize_yo);
+                                !value.is_empty()
+                                    && !value.contains(char::is_whitespace)
+                                    && values.insert(value)
+                            })
+                    }
+                    SlotType::Integer => {
+                        slot.values.is_empty()
+                            && slot.min.is_some()
+                            && slot.max.is_some()
+                            && slot.min <= slot.max
+                    }
+                    SlotType::Boolean => {
+                        slot.values.is_empty() && slot.min.is_none() && slot.max.is_none()
+                    }
+                };
+                if !valid_name || !valid_policy {
+                    return Err(ConfigError::Validation(format!(
+                        "command {} has invalid slot {name}",
+                        command.id
+                    )));
+                }
+            }
             for action in command.resolved_actions() {
                 if action.handler.trim().is_empty() {
                     return Err(ConfigError::Validation(format!(
@@ -564,7 +702,14 @@ impl CoreConfig {
                 )));
             }
             for phrase in &command.phrases {
-                let normalized = normalize(phrase, self.matching.normalize_yo);
+                let normalized =
+                    normalize_pattern(phrase, self.matching.normalize_yo, &command.slots)
+                        .ok_or_else(|| {
+                            ConfigError::Validation(format!(
+                                "command {} has an invalid slot placeholder",
+                                command.id
+                            ))
+                        })?;
                 if normalized.is_empty() {
                     return Err(ConfigError::Validation(format!(
                         "command phrase is empty after normalization: {}",
@@ -578,9 +723,58 @@ impl CoreConfig {
                     )));
                 }
             }
+            for action in command.resolved_actions() {
+                for value in action.parameters.values() {
+                    if let Some(name) = placeholder(value)
+                        && (!command.slots.contains_key(name)
+                            || command.phrases.iter().any(|phrase| {
+                                !phrase
+                                    .split_whitespace()
+                                    .any(|token| placeholder(token) == Some(name))
+                            }))
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "command {} parameter references slot {name} not captured by every phrase",
+                            command.id
+                        )));
+                    }
+                }
+            }
         }
         Ok(())
     }
+}
+
+fn placeholder(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .filter(|value| !value.is_empty() && !value.contains('{') && !value.contains('}'))
+}
+
+fn normalize_pattern(
+    phrase: &str,
+    normalize_yo: bool,
+    slots: &std::collections::BTreeMap<String, SlotConfig>,
+) -> Option<String> {
+    let mut normalized = Vec::new();
+    for token in phrase.split_whitespace() {
+        if let Some(name) = placeholder(token) {
+            if !slots.contains_key(name) {
+                return None;
+            }
+            normalized.push("{}".into());
+        } else if token.contains('{') || token.contains('}') {
+            return None;
+        } else {
+            normalized.extend(
+                normalize(token, normalize_yo)
+                    .split_whitespace()
+                    .map(str::to_owned),
+            );
+        }
+    }
+    Some(normalized.join(" "))
 }
 
 #[cfg(windows)]
@@ -654,9 +848,21 @@ mod tests {
     }
 
     #[test]
+    fn parameter_slot_must_be_captured_by_every_phrase() {
+        let mut config = valid_config();
+        let command = config
+            .commands
+            .iter_mut()
+            .find(|command| command.id == "set_volume_voice")
+            .unwrap();
+        command.phrases.push("установи обычную громкость".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn schema_one_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 5",
+            "schema_version = 6",
             "schema_version = 1",
             1,
         );
@@ -669,7 +875,7 @@ mod tests {
     #[test]
     fn schema_two_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 5",
+            "schema_version = 6",
             "schema_version = 2",
             1,
         );
@@ -682,7 +888,7 @@ mod tests {
     #[test]
     fn schema_three_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml")
-            .replacen("schema_version = 5", "schema_version = 3", 1)
+            .replacen("schema_version = 6", "schema_version = 3", 1)
             .replace("model = \"alphacep/vosk-model-streaming-ru\"\r\n", "")
             .replace("model = \"alphacep/vosk-model-streaming-ru\"\n", "");
         let config = CoreConfig::from_toml_str(&text).unwrap();
@@ -694,8 +900,21 @@ mod tests {
     #[test]
     fn schema_four_is_migrated() {
         let text = include_str!("../../../config/assistant.example.toml").replacen(
-            "schema_version = 5",
+            "schema_version = 6",
             "schema_version = 4",
+            1,
+        );
+        assert_eq!(
+            CoreConfig::from_toml_str(&text).unwrap().schema_version,
+            CURRENT_CONFIG_VERSION
+        );
+    }
+
+    #[test]
+    fn schema_five_is_migrated() {
+        let text = include_str!("../../../config/assistant.example.toml").replacen(
+            "schema_version = 6",
+            "schema_version = 5",
             1,
         );
         assert_eq!(

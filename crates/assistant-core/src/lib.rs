@@ -32,13 +32,16 @@ pub mod wakeword;
 /// Semantic version of the running core build.
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Stable Rust extension API version. Increment only for breaking contracts.
-pub const CORE_API_VERSION: u16 = 4;
+pub const CORE_API_VERSION: u16 = 5;
 
 pub use commands::{
-    ClickMouseHandler, CommandHandler, CommandRegistry, HandlerRegistry, HandlerSchema,
-    LaunchAppExecutor, LaunchAppHandler, OpenUrlHandler, SetVolumeHandler, builtin_handlers,
+    ClickMouseHandler, CommandHandler, CommandMatch, CommandRegistry, HandlerRegistry,
+    HandlerSchema, LaunchAppExecutor, LaunchAppHandler, OpenUrlHandler, SetVolumeHandler,
+    builtin_handlers,
 };
-pub use config::{AppPaths, CommandActionConfig, CoreConfig};
+pub use config::{
+    AppPaths, CommandActionConfig, CommandConfig, CoreConfig, PolicyConfig, SlotConfig, SlotType,
+};
 pub use domain::*;
 #[cfg(windows)]
 pub use ipc::windows::{CoreIpcClient, EventSubscription, IpcClientError};

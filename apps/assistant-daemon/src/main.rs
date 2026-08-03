@@ -1,5 +1,7 @@
 use std::{
+    backtrace::Backtrace,
     collections::VecDeque,
+    fs::OpenOptions,
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
@@ -31,6 +33,7 @@ use assistant_core::{
 };
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser)]
 struct Args {
@@ -140,11 +143,56 @@ impl MissedWakeWord {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let log_path = initialize_logging()?;
+    install_panic_logger();
+    tracing::info!(
+        core_version = CORE_VERSION,
+        path = %log_path.display(),
+        "assistant daemon starting"
+    );
+    let result = (|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(run())
+    })();
+    if let Err(error) = &result {
+        tracing::error!(error = ?error, "assistant daemon stopped with an error");
+    }
+    result
+}
+
+fn initialize_logging() -> anyhow::Result<PathBuf> {
+    let path = std::env::current_exe()?.with_file_name("assistant-daemon.log");
+    let file = Arc::new(OpenOptions::new().create(true).append(true).open(&path)?);
     tracing_subscriber::fmt()
-        .with_env_filter("assistant_core=info,assistant_daemon=info")
-        .init();
+        .with_env_filter("warn,assistant_core=trace,assistant_daemon=trace")
+        .with_ansi(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_writer(file.and(std::io::stderr.with_max_level(tracing::Level::WARN)))
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to initialize logging: {error}"))?;
+    Ok(path)
+}
+
+fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        tracing::error!(
+            panic = %panic,
+            backtrace = %Backtrace::force_capture(),
+            "panic"
+        );
+        previous(panic);
+    }));
+}
+
+async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
     let paths = AppPaths::discover()?;
     paths.ensure_directories()?;
@@ -768,12 +816,14 @@ fn start_model_install(context: DaemonContext) -> Result<(), String> {
                 set_last_error(&context, Some(error.to_string()));
             }
             Err(error) => {
+                let message = error.to_string();
                 set_model_status(
                     &context,
                     ModelStatus::Failed {
-                        message: error.to_string(),
+                        message: message.clone(),
                     },
                 );
+                set_last_error(&context, Some(message));
             }
         }
         context.model_installing.store(false, Ordering::Release);
@@ -1238,6 +1288,9 @@ fn restore_ready_status(context: &DaemonContext, ready: bool) {
 }
 
 fn set_last_error(context: &DaemonContext, error: Option<String>) {
+    if let Some(message) = error.as_deref() {
+        tracing::error!(%message, "component failure recorded");
+    }
     if let Ok(mut current) = context.last_error.lock() {
         *current = error;
     }
@@ -1296,10 +1349,9 @@ fn core_error(error: CoreError) -> CoreResponse {
 }
 
 fn error_response(code: IpcErrorCode, error: impl std::fmt::Display) -> CoreResponse {
-    CoreResponse::Error {
-        code,
-        message: error.to_string(),
-    }
+    let message = error.to_string();
+    tracing::warn!(?code, %message, "IPC request failed");
+    CoreResponse::Error { code, message }
 }
 
 #[allow(

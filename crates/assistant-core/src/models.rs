@@ -530,9 +530,19 @@ fn model_source<T>(
     relative: &str,
     operation: impl FnOnce() -> Result<T, ApiError>,
 ) -> Result<T, ModelError> {
-    catch_unwind(AssertUnwindSafe(operation))
-        .map_err(|_| ModelError::Hub(format!("model source failed to prepare {relative}")))?
-        .map_err(|error| ModelError::Hub(error.to_string()))
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => result.map_err(|error| ModelError::Hub(error.to_string())),
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic");
+            Err(ModelError::Hub(format!(
+                "model source failed to prepare {relative}: {detail}"
+            )))
+        }
+    }
 }
 
 fn digest(path: &Path) -> Result<String, ModelError> {
@@ -623,6 +633,8 @@ mod tests {
     fn model_source_panic_becomes_a_typed_error() {
         let error =
             model_source::<()>("am/model.onnx", || panic!("upstream cache assertion")).unwrap_err();
-        assert!(matches!(error, ModelError::Hub(message) if message.contains("am/model.onnx")));
+        assert!(matches!(error, ModelError::Hub(message)
+                if message.contains("am/model.onnx")
+                    && message.contains("upstream cache assertion")));
     }
 }

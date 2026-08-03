@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.2-rc.1] — 2026-08-03
+
+### Добавлено
+
+- `assistant-daemon.log` рядом с исполняемым файлом daemon с подробными событиями,
+  цепочками ошибок, местом в коде, потоком и backtrace паник.
+
+### Исправлено
+
+- ошибка подготовки модели теперь сохраняет исходный текст паники Hugging Face;
+- теги с prerelease-суффиксом публикуются GitHub Actions как предрелизы.
+
 ## [1.5.1] — 2026-08-03
 
 ### Добавлено
@@ -157,3 +169,4 @@
 [1.4.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.4.0
 [1.5.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.0
 [1.5.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.1
+[1.5.2-rc.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.1

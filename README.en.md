@@ -11,7 +11,7 @@ A local Rust voice-assistant core for Windows 10/11. The core captures microphon
 audio, detects a wake phrase, recognizes Russian speech, and runs only registered,
 typed commands.
 
-The current stable release is **1.5.1**. It exposes Rust extension API v6 and IPC
+The current stable release is **1.5.1**; the current prerelease is **1.5.2-rc.1**. It exposes Rust extension API v6 and IPC
 protocol v7. Audio formats, queues, and inference are isolated from the GUI.
 
 ## Versioning
@@ -74,6 +74,11 @@ and run the prebuilt applications:
 .\assistant-daemon.exe
 .\assistant-cli.exe status
 ```
+
+On every start, the daemon creates or appends to `assistant-daemon.log` next to
+`assistant-daemon.exe`. The log includes component warnings and errors, internal
+core diagnostics, error chains, source locations, thread details, and panic
+backtraces. Audio and full transcripts are not logged.
 
 Rust and Cargo are not required for the packaged release. To develop the core:
 

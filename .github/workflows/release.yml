@@ -36,6 +36,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged assistant-daemon failed to start" }
       - name: Publish GitHub release
         shell: pwsh
-        run: gh release create $env:GITHUB_REF_NAME --verify-tag --generate-notes "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"
+        run: |
+          $archive = "voice-assistant-core-$env:GITHUB_REF_NAME-windows-x64.zip"
+          $ghArgs = @("release", "create", $env:GITHUB_REF_NAME, "--verify-tag", "--generate-notes", $archive)
+          if ($env:GITHUB_REF_NAME.Contains("-")) { $ghArgs += "--prerelease" }
+          & gh @ghArgs
         env:
           GH_TOKEN: ${{ github.token }}

@@ -33,7 +33,7 @@
   </nav>
   <main>
     <h1>Voice Assistant Core</h1>
-    <p>Voice Assistant Core <strong>1.5.1</strong> — локальное Windows-ядро с
+    <p>Voice Assistant Core <strong>1.5.2-rc.1</strong> — локальное Windows-ядро с
       versioned IPC и стабильным Rust extension API v6.
       GUI, аудио, inference и типизированные команды разделены явными границами.</p>
     <p><a href="rustdoc/assistant_core/index.html">Открыть опубликованный Rustdoc</a>.
@@ -50,6 +50,11 @@
       и необходимые runtime-DLL; Rust и Cargo не требуются.</p>
     <pre><code>.\assistant-daemon.exe
 .\assistant-cli.exe status</code></pre>
+    <p>При каждом запуске daemon создаёт или дополняет
+      <code>assistant-daemon.log</code> рядом с <code>assistant-daemon.exe</code>.
+      Журнал содержит предупреждения и ошибки компонентов, внутренние диагностические
+      события ядра, исходные цепочки ошибок, место в коде, поток и backtrace паники.
+      Аудио и полный распознанный текст в журнал не записываются.</p>
     <p>Для разработки самого ядра используйте сборку из исходников:</p>
     <pre><code>cargo run -p assistant-cli -- models install
 cargo run -p assistant-daemon

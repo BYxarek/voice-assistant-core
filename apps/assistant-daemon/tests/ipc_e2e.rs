@@ -40,6 +40,7 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
     ));
     let config_path = root.join("assistant.toml");
     let models_path = root.join("models");
+    let log_path = root.join("VoiceAssistantCore/logs/assistant-daemon.log");
     let mut config = CoreConfig::bundled_example().unwrap();
     config.ipc.pipe_name = format!("voice-assistant-e2e-{}-{nonce}", std::process::id());
     config.ipc.io_timeout_ms = 2_000;
@@ -50,6 +51,7 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
         .arg(&config_path)
         .args(["--models"])
         .arg(&models_path)
+        .env("LOCALAPPDATA", &root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -161,4 +163,6 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     assert!(status.success(), "daemon exited with {status}");
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(!log.contains("IPC client disconnected"), "{log}");
 }

@@ -165,7 +165,7 @@ pub enum IpcClientError {
     UnexpectedResponse,
 }
 
-/// Serves concurrent, local-only IPC clients using the current protocol.
+/// Serves concurrent, local-only IPC clients using one request per ordinary connection.
 pub async fn serve_named_pipe(
     pipe_name: &str,
     io_timeout: Duration,
@@ -245,39 +245,36 @@ async fn serve_client(
     events: &broadcast::Sender<AssistantEvent>,
     io_timeout: Duration,
 ) -> io::Result<()> {
-    loop {
-        let request = read_request(&mut server, io_timeout).await?;
-        let request_id = request.request_id.clone();
-        if request.protocol_version != PROTOCOL_VERSION {
-            write_response(
-                &mut server,
-                Envelope::new(
-                    request_id,
-                    CoreResponse::Error {
-                        code: IpcErrorCode::ProtocolVersion,
-                        message: format!(
-                            "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
-                            request.protocol_version
-                        ),
-                    },
-                ),
-                io_timeout,
-            )
-            .await?;
-            continue;
-        }
-        if matches!(request.payload, CoreRequest::SubscribeEvents) {
-            write_response(
-                &mut server,
-                Envelope::new(request_id.clone(), CoreResponse::Accepted),
-                io_timeout,
-            )
-            .await?;
-            return serve_events(&mut server, events.subscribe(), request_id, io_timeout).await;
-        }
-        let response = handler(request.payload).await;
-        write_response(&mut server, Envelope::new(request_id, response), io_timeout).await?;
+    let request = read_request(&mut server, io_timeout).await?;
+    let request_id = request.request_id.clone();
+    if request.protocol_version != PROTOCOL_VERSION {
+        return write_response(
+            &mut server,
+            Envelope::new(
+                request_id,
+                CoreResponse::Error {
+                    code: IpcErrorCode::ProtocolVersion,
+                    message: format!(
+                        "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
+                        request.protocol_version
+                    ),
+                },
+            ),
+            io_timeout,
+        )
+        .await;
     }
+    if matches!(request.payload, CoreRequest::SubscribeEvents) {
+        write_response(
+            &mut server,
+            Envelope::new(request_id.clone(), CoreResponse::Accepted),
+            io_timeout,
+        )
+        .await?;
+        return serve_events(&mut server, events.subscribe(), request_id, io_timeout).await;
+    }
+    let response = handler(request.payload).await;
+    write_response(&mut server, Envelope::new(request_id, response), io_timeout).await
 }
 
 async fn serve_events(

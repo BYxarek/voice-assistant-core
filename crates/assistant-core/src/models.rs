@@ -8,8 +8,8 @@ use std::{
 };
 
 use hf_hub::{
-    Repo, RepoType,
-    api::sync::{ApiBuilder, ApiError, ApiRepo},
+    Cache, CacheRepo, Repo, RepoType,
+    api::sync::{Api, ApiBuilder, ApiError, ApiRepo},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -328,12 +328,19 @@ impl ModelManager {
                 .with_progress(true)
                 .build()
                 .map_err(|e| ModelError::Hub(e.to_string()))?;
-            let repo = api.repo(Repo::with_revision(
-                spec.id().into(),
-                RepoType::Model,
-                spec.revision().into(),
-            ));
-            let files = copy_model_files(spec, &repo, &temporary, cancelled, &mut progress)?;
+            let repository =
+                Repo::with_revision(spec.id().into(), RepoType::Model, spec.revision().into());
+            let cache = Cache::new(hub_cache.clone()).repo(repository.clone());
+            let repo = api.repo(repository);
+            let files = copy_model_files(
+                spec,
+                &api,
+                &repo,
+                &cache,
+                &temporary,
+                cancelled,
+                &mut progress,
+            )?;
             fs::remove_dir_all(hub_cache)?;
             let manifest = ModelManifest {
                 schema_version: 1,
@@ -495,7 +502,9 @@ fn available_space(_directory: &Path) -> Result<u64, ModelError> {
 
 fn copy_model_files(
     spec: ModelSpec,
+    api: &Api,
     repo: &ApiRepo,
+    cache: &CacheRepo,
     destination: &Path,
     cancelled: &AtomicBool,
     progress: &mut impl FnMut(ModelInstallProgress),
@@ -505,7 +514,7 @@ fn copy_model_files(
         if cancelled.load(Ordering::Acquire) {
             return Err(ModelError::Cancelled);
         }
-        let source = model_source(relative, || repo.get(relative))?;
+        let source = download_model_source(relative, api, repo, cache)?;
         let target = destination.join(relative);
         let parent = target
             .parent()
@@ -524,6 +533,55 @@ fn copy_model_files(
         });
     }
     Ok(files)
+}
+
+#[cfg(windows)]
+fn download_model_source(
+    relative: &str,
+    api: &Api,
+    repo: &ApiRepo,
+    cache: &CacheRepo,
+) -> Result<PathBuf, ModelError> {
+    let metadata = model_source(relative, || api.metadata(&repo.url(relative)))?;
+    let blob =
+        prepare_windows_cache_download(cache, relative, metadata.commit_hash(), metadata.etag())?;
+    model_source(relative, || repo.download(relative))?;
+    if blob.is_file() {
+        Ok(blob)
+    } else {
+        Err(ModelError::Hub(format!(
+            "model source did not cache {relative}"
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn prepare_windows_cache_download(
+    cache: &CacheRepo,
+    relative: &str,
+    commit_hash: &str,
+    etag: &str,
+) -> Result<PathBuf, ModelError> {
+    let pointer = cache.pointer_path(commit_hash).join(relative);
+    fs::create_dir_all(
+        pointer
+            .parent()
+            .ok_or_else(|| ModelError::Manifest("model cache file has no parent".into()))?,
+    )?;
+    // ponytail: hf-hub 0.5 creates broken relative symlinks on Windows; remove this
+    // placeholder workaround when its Windows cache uses copies instead.
+    fs::write(&pointer, [])?;
+    Ok(cache.blob_path(etag))
+}
+
+#[cfg(not(windows))]
+fn download_model_source(
+    relative: &str,
+    _api: &Api,
+    repo: &ApiRepo,
+    _cache: &CacheRepo,
+) -> Result<PathBuf, ModelError> {
+    model_source(relative, || repo.get(relative))
 }
 
 fn model_source<T>(
@@ -636,5 +694,38 @@ mod tests {
         assert!(matches!(error, ModelError::Hub(message)
                 if message.contains("am/model.onnx")
                     && message.contains("upstream cache assertion")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cache_download_uses_blob_behind_placeholder() {
+        let root = std::env::temp_dir().join(format!(
+            "assistant-hub-cache-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = Cache::new(root.clone()).repo(Repo::with_revision(
+            ALPHACEP_STREAMING_RU_REPO.into(),
+            RepoType::Model,
+            ALPHACEP_STREAMING_RU_REVISION.into(),
+        ));
+        let relative = "am-onnx/encoder.int8.onnx";
+        let blob = prepare_windows_cache_download(
+            &cache,
+            relative,
+            ALPHACEP_STREAMING_RU_REVISION,
+            "etag",
+        )
+        .unwrap();
+        let pointer = cache
+            .pointer_path(ALPHACEP_STREAMING_RU_REVISION)
+            .join(relative);
+
+        assert!(pointer.is_file());
+        assert_eq!(blob, cache.blob_path("etag"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -11,7 +11,7 @@ A local Rust voice-assistant core for Windows 10/11. The core captures microphon
 audio, detects a wake phrase, recognizes Russian speech, and runs only registered,
 typed commands.
 
-The current stable release is **1.5.1**; the current prerelease is **1.5.2-rc.2**. It exposes Rust extension API v6 and IPC
+The current stable release is **1.5.1**; the current prerelease is **1.5.2-rc.3**. It exposes Rust extension API v6 and IPC
 protocol v7. Audio formats, queues, and inference are isolated from the GUI.
 
 ## Versioning
@@ -78,7 +78,8 @@ and run the prebuilt applications:
 The daemon creates or appends to
 `%LOCALAPPDATA%\VoiceAssistantCore\logs\assistant-daemon.log`. The log includes
 component warnings and errors, internal core diagnostics, error chains, source
-locations, thread details, and panic backtraces. Audio and full transcripts are not logged.
+locations, thread details, and panic backtraces. Audio, full transcripts, and normal
+IPC client disconnects after a request are not logged.
 
 Rust and Cargo are not required for the packaged release. To develop the core:
 
@@ -457,9 +458,10 @@ are available for STT but are intentionally rejected as wake-word models.
 Changing a model through `ApplyConfig` requires a daemon restart; IPC
 `InstallModel` installs both selected models.
 
-Each installation uses an isolated temporary Hugging Face cache, preventing concurrent
-Windows processes from corrupting snapshot pointers. A model-source failure or panic is
-returned as `ModelError::Hub` instead of terminating the background task.
+Each installation uses an isolated temporary Hugging Face cache. On Windows, downloaded
+blobs are copied directly without snapshot symlinks, so installation does not depend on
+Developer Mode. A model-source failure or panic is returned as `ModelError::Hub` instead
+of terminating the background task.
 
 ```text
 models\<repo-name>\<revision>\

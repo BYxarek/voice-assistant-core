@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.2-rc.3] — 2026-08-03
+
+### Исправлено
+
+- обычное закрытие одноразового IPC-соединения больше не записывается как ошибка
+  после каждого запроса GUI;
+- загрузка моделей на Windows больше не падает из-за некорректной символической
+  ссылки во временном кэше `hf-hub`.
+
 ## [1.5.2-rc.2] — 2026-08-03
 
 ### Исправлено
@@ -178,3 +187,4 @@
 [1.5.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.1
 [1.5.2-rc.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.1
 [1.5.2-rc.2]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.2
+[1.5.2-rc.3]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.3

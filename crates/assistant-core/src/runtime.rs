@@ -59,6 +59,8 @@ pub struct Runtime {
     streaming_stt: bool,
     confirming_by_voice: bool,
     last_partial: String,
+    session_sequence: u64,
+    active_session_id: Option<u64>,
     handler_guards: HashMap<String, HandlerGuard>,
 }
 
@@ -121,6 +123,8 @@ impl Runtime {
             streaming_stt: false,
             confirming_by_voice: false,
             last_partial: String::new(),
+            session_sequence: 0,
+            active_session_id: None,
             handler_guards: HashMap::new(),
         }
     }
@@ -230,11 +234,30 @@ impl Runtime {
             && self.policy.voice_confirmations_enabled
         {
             self.confirming_by_voice = true;
-            return self.transition(AssistantState::CapturingCommand);
+            self.transition(AssistantState::CapturingCommand)?;
+            return self.start_speech_session();
         }
         self.transition(AssistantState::SpeechDetected)?;
         self.transition(AssistantState::WakeWordDetected)?;
-        self.transition(AssistantState::CapturingCommand)
+        self.transition(AssistantState::CapturingCommand)?;
+        self.start_speech_session()
+    }
+
+    /// Starts a VAD-delimited speech session that may or may not authorize a command.
+    pub fn start_speech_capture(&mut self, wake_word_detected: bool) -> Result<(), CoreError> {
+        if self.state == AssistantState::AwaitingConfirmation
+            && self.policy.voice_confirmations_enabled
+        {
+            self.confirming_by_voice = true;
+            self.transition(AssistantState::CapturingCommand)?;
+            return self.start_speech_session();
+        }
+        self.transition(AssistantState::SpeechDetected)?;
+        if wake_word_detected {
+            self.transition(AssistantState::WakeWordDetected)?;
+        }
+        self.transition(AssistantState::CapturingCommand)?;
+        self.start_speech_session()
     }
 
     /// Starts capture requested by a trusted application without a wake word.
@@ -245,13 +268,15 @@ impl Runtime {
             }
             self.confirming_by_voice = true;
         }
-        self.transition(AssistantState::CapturingCommand)
+        self.transition(AssistantState::CapturingCommand)?;
+        self.start_speech_session()
     }
 
     /// Returns an empty or too-short manual capture to idle listening.
     pub fn cancel_capture(&mut self) -> Result<(), CoreError> {
         self.streaming_stt = false;
         self.last_partial.clear();
+        self.end_speech_session();
         if self.confirming_by_voice {
             self.confirming_by_voice = false;
             return self.transition(AssistantState::AwaitingConfirmation);
@@ -261,6 +286,9 @@ impl Runtime {
 
     /// Starts incremental STT as soon as command capture begins.
     pub async fn begin_transcription_stream(&mut self, sample_rate: u32) -> Result<(), CoreError> {
+        if self.active_session_id.is_none() {
+            return Err(CoreError::Busy("no speech session is active".into()));
+        }
         self.last_partial.clear();
         self.streaming_stt =
             match tokio::time::timeout(self.stt_timeout, self.recognizer.begin_stream(sample_rate))
@@ -291,6 +319,7 @@ impl Runtime {
                 {
                     self.last_partial.clone_from(&partial.text);
                     let _ = self.events.send(AssistantEvent::TranscriptPartial {
+                        session_id: self.active_session_id.unwrap_or_default(),
                         text: partial.text,
                         confidence: partial.confidence,
                     });
@@ -331,6 +360,20 @@ impl Runtime {
         &mut self,
         request: TranscriptionRequest,
     ) -> Result<(), CoreError> {
+        self.process_captured_speech(request, true).await
+    }
+
+    /// Finalizes STT and only matches commands for wake-word-authorized speech.
+    pub async fn process_captured_speech(
+        &mut self,
+        request: TranscriptionRequest,
+        command_authorized: bool,
+    ) -> Result<(), CoreError> {
+        let session_id = self
+            .active_session_id
+            .take()
+            .ok_or_else(|| CoreError::Busy("no speech session is active".into()))?;
+        let _ = self.events.send(AssistantEvent::SpeechEnded { session_id });
         self.transition(AssistantState::Transcribing)?;
 
         let started = Instant::now();
@@ -370,13 +413,16 @@ impl Runtime {
             if self.confirming_by_voice {
                 self.confirming_by_voice = false;
                 self.transition(AssistantState::AwaitingConfirmation)?;
+            } else if !command_authorized {
+                self.transition(AssistantState::IdleListening)?;
             } else {
                 self.transition(AssistantState::MatchingCommand)?;
                 self.enter_cooldown()?;
             }
             return Ok(());
         }
-        let _ = self.events.send(AssistantEvent::TranscriptReady {
+        let _ = self.events.send(AssistantEvent::TranscriptFinal {
+            session_id,
             text: transcript.text.clone(),
             confidence: transcript.confidence,
         });
@@ -384,8 +430,31 @@ impl Runtime {
             self.confirming_by_voice = false;
             return self.process_confirmation_text(transcript.text).await;
         }
+        if !command_authorized {
+            self.transition(AssistantState::IdleListening)?;
+            return Ok(());
+        }
         self.transition(AssistantState::MatchingCommand)?;
         self.match_text(transcript.text, true).await
+    }
+
+    fn start_speech_session(&mut self) -> Result<(), CoreError> {
+        if self.active_session_id.is_some() {
+            return Err(CoreError::Busy("speech session is already active".into()));
+        }
+        self.session_sequence = self.session_sequence.wrapping_add(1);
+        let session_id = self.session_sequence;
+        self.active_session_id = Some(session_id);
+        let _ = self
+            .events
+            .send(AssistantEvent::SpeechStarted { session_id });
+        Ok(())
+    }
+
+    fn end_speech_session(&mut self) {
+        if let Some(session_id) = self.active_session_id.take() {
+            let _ = self.events.send(AssistantEvent::SpeechEnded { session_id });
+        }
     }
 
     async fn process_confirmation_text(&mut self, text: String) -> Result<(), CoreError> {
@@ -1006,6 +1075,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_wake_speech_is_transcribed_without_executing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let phrase = command(RiskLevel::Low).phrases[0].clone();
+        let mut runtime = Runtime::new(
+            Arc::new(MockRecognizer { text: phrase }),
+            CommandRegistry::new(vec![command(RiskLevel::Low)], true),
+            Arc::new(CountingExecutor(Arc::clone(&calls))),
+            "assistant".into(),
+            PolicyConfig::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            CoreMetrics::default(),
+        );
+        let mut events = runtime.subscribe();
+        runtime.start().unwrap();
+        runtime.start_speech_capture(false).unwrap();
+        runtime
+            .process_captured_speech(request(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.state(), AssistantState::IdleListening);
+        let session_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AssistantEvent::SpeechStarted { session_id } => Some(("start", session_id)),
+                AssistantEvent::SpeechEnded { session_id } => Some(("end", session_id)),
+                AssistantEvent::TranscriptFinal { session_id, .. } => Some(("final", session_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(session_events, [("start", 1), ("end", 1), ("final", 1)]);
+    }
+
+    #[tokio::test]
     async fn command_actions_execute_in_order_with_delays() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut sequenced = command(RiskLevel::Low);
@@ -1176,10 +1280,13 @@ mod tests {
         runtime.begin_transcription_stream(16_000).await.unwrap();
         runtime.push_transcription_stream(vec![0.1]).await.unwrap();
         runtime.push_transcription_stream(vec![0.1]).await.unwrap();
-        let partials = std::iter::from_fn(|| events.try_recv().ok())
-            .filter(|event| matches!(event, AssistantEvent::TranscriptPartial { .. }))
-            .count();
-        assert_eq!(partials, 1);
+        let partials: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AssistantEvent::TranscriptPartial { session_id, .. } => Some(session_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(partials, [1]);
     }
 
     #[tokio::test]

@@ -11,8 +11,8 @@ A local Rust voice-assistant core for Windows 10/11. The core captures microphon
 audio, detects a wake phrase, recognizes Russian speech, and runs only registered,
 typed commands.
 
-The current stable release is **1.5.0**. It exposes Rust extension API v5 and IPC
-protocol v6. Audio formats, queues, and inference are isolated from the GUI.
+The current stable release is **1.5.1**. It exposes Rust extension API v6 and IPC
+protocol v7. Audio formats, queues, and inference are isolated from the GUI.
 
 ## Versioning
 
@@ -29,13 +29,15 @@ configuration, and required runtime DLLs.
 
 ## Features
 
-- bounded audio pipeline: CPAL → mono → 16 kHz → KWS → VAD → STT;
+- bounded audio pipeline: CPAL → mono → 16 kHz → KWS/VAD → STT;
 - while `Starting` or `Suspended`, the worker drains bounded input without
   resampling, VAD, or inference;
 - dedicated runtime task and supervised persistent STT worker with warm-up,
   timeout watchdog, bounded restart budget, and exponential backoff;
-- streaming STT starts immediately after the wake word, decodes 100 ms batches
-  while capture continues, and publishes changed partial transcripts;
+- IPC continuous recognition segments every utterance in the core, retains pre-roll,
+  and publishes partial/final transcripts linked by `session_id`;
+- ordinary speech never reaches command matching; a wake word, explicit push-to-talk/
+  `submit_text`, or a one-time confirmation authorizes an action;
 - IPC is available in `Starting` while a cancellable blocking worker loads STT
   and publishes progress;
 - microphone recovery after callback failure or stall, with automatic switching
@@ -108,10 +110,10 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Public Rust API v5
+## Public Rust API v6
 
 The stable export boundary is the `assistant_core` crate root.
-`CORE_API_VERSION` is `5`. Version 5 includes:
+`CORE_API_VERSION` is `6`. Version 6 includes:
 
 - `CommandHandler`, `HandlerSchema`, and `HandlerRegistry` for command extensions;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`, and
@@ -121,11 +123,12 @@ The stable export boundary is the `assistant_core` crate root.
 - `CoreConfig`, `CommandConfig`, `SlotConfig`, and public domain events, states,
   and errors;
 - streaming `SpeechRecognizer::push_stream_partial`;
+- VAD session events and session-linked partial/final transcripts;
 - `CoreMetrics` and `MetricsSnapshot`.
 
 Breaking changes to these contracts require a new major crate API version and
 an increment of `CORE_API_VERSION`. IPC changes remain compatible within
-protocol v6; an incompatible wire-format change increments `PROTOCOL_VERSION`.
+protocol v7; an incompatible wire-format change increments `PROTOCOL_VERSION`.
 
 Minimal command extension:
 
@@ -168,7 +171,7 @@ passes the registry through `RuntimeComponents`; the daemon uses the built-in
 STT and wake-word detection remain replaceable through `SpeechRecognizer` and
 `WakeWordDetector`. The GUI does not embed the internal runtime; it uses IPC.
 
-## IPC protocol v6
+## IPC protocol v7
 
 ### Web Speech API as an external STT engine
 
@@ -223,7 +226,7 @@ The native bridge encodes the call as a regular IPC request:
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "request_id": "web-speech-1",
   "payload": {
     "type": "submit_text",
@@ -256,7 +259,7 @@ Requests:
 - `get_status`, `get_health`, `get_config`, `get_metrics`, `list_handlers`;
 - `validate_config`, `apply_config`, `list_audio_devices`;
 - `get_model_status`, `install_model`, `cancel_model_install`, `verify_model`;
-- `suspend`, `resume`, `begin_capture`, `end_capture`, `submit_text`;
+- `suspend`, `resume`, `set_continuous_recognition`, `begin_capture`, `end_capture`, `submit_text`;
 - `confirm`, `cancel`;
 - `subscribe_events`, `shutdown`.
 
@@ -264,6 +267,12 @@ Requests:
 STT only when it is at least `audio.command_min_ms` long. `submit_text` accepts a
 non-empty UTF-8 string up to 4096 bytes, matches it without requiring a wake-word
 prefix, and applies the same risk, confirmation, and timeout rules.
+
+`set_continuous_recognition { enabled: true }` enables daemon-side VAD segmentation.
+It emits `speech_started { session_id }`, `speech_ended { session_id }`, and
+session-linked `transcript_partial`/`transcript_final` events. Speech without a
+wake word is transcribed but does not execute a command. Silence uses VAD speech
+frames instead of averaging the full recording together with trailing silence.
 
 `CoreIpcClient` validates the version, limits message size, and retries transient
 connection failures. `subscribe_events` creates a separate `EventSubscription`.
@@ -273,8 +282,8 @@ Errors have stable `IpcErrorCode` values.
 parameters. `HealthSnapshot.components` reports `ready`, `recovering`, `faulted`,
 or `stopped`, together with the automatic restart count.
 
-The event stream publishes changed `transcript_partial { text, confidence }`
-events, a final `transcript_ready`, `audio_level { rms }` at most ten times per
+The event stream publishes changed `transcript_partial { session_id, text, confidence }`
+events, a final `transcript_final { session_id, text, confidence }`, `audio_level { rms }` at most ten times per
 second, and `transcript_unavailable { reason }`. Reasons are
 `wake_word_not_detected`, `too_short`, `silence`, and `model_unavailable`.
 `audio.device_id` cannot be empty; use `default` for the system input.
@@ -437,11 +446,15 @@ cargo run -p assistant-cli -- validate-config
 cargo run -p assistant-cli -- transcribe .\command.wav
 ```
 
-`inference.model` selects STT, while `wake_word.model` selects a separate online
-KWS model with `lang/bpe.model`. Offline models and models without SentencePiece
+`inference.model` selects STT, while `wake_word.model` selects a separate streaming
+KWS model with `lang/bpe.model`. `FinalOnly` models and models without SentencePiece
 are available for STT but are intentionally rejected as wake-word models.
 Changing a model through `ApplyConfig` requires a daemon restart; IPC
 `InstallModel` installs both selected models.
+
+Each installation uses an isolated temporary Hugging Face cache, preventing concurrent
+Windows processes from corrupting snapshot pointers. A model-source failure or panic is
+returned as `ModelError::Hub` instead of terminating the background task.
 
 ```text
 models\<repo-name>\<revision>\
@@ -521,7 +534,7 @@ $env:VOICE_ASSISTANT_TEST_TRANSCRIPT = "ассистент открой блок
 cargo test -p assistant-core --all-features --test real_audio -- --ignored
 ```
 
-To verify any catalog online/offline model separately, set
+To verify any catalog `Streaming`/`FinalOnly` model separately, set
 `VOICE_ASSISTANT_TEST_STT_WAV`, `VOICE_ASSISTANT_TEST_STT_MODEL`,
 `VOICE_ASSISTANT_TEST_STT_MODEL_ID`, and `VOICE_ASSISTANT_TEST_STT_TRANSCRIPT`,
 then run the ignored `fixed_real_wav_transcribes_with_selected_catalog_model` test.
@@ -529,9 +542,10 @@ then run the ignored `fixed_real_wav_transcribes_with_selected_catalog_model` te
 The file must remain an unchanged mono WAV, and the expected transcript is fixed
 through the environment variable.
 
-To manually verify streaming events, run the daemon with an online model,
-subscribe an IPC client to events, and say the wake word followed by a command.
-At least one changed `transcript_partial` must arrive before `transcript_ready`.
+To manually verify streaming events, run the daemon with a `Streaming` model,
+enable `set_continuous_recognition`, subscribe an IPC client to events, and say an
+ordinary phrase followed by a wake-word command. Session IDs must match across
+speech and transcript events, and the ordinary phrase must not start a handler.
 For a high-risk command, say the wake word and “да” after
 `confirmation_required`; the handler must start exactly once.
 

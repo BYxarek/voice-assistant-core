@@ -11,8 +11,8 @@
 звук с микрофона, обнаруживает ключевую фразу, распознаёт русскую речь и
 выполняет только зарегистрированные типизированные команды.
 
-Текущий стабильный релиз — **1.5.0**. Публичный Rust extension API v5 и IPC
-protocol v6. Форматы аудио, очереди и
+Текущий стабильный релиз — **1.5.1**. Публичный Rust extension API v6 и IPC
+protocol v7. Форматы аудио, очереди и
 inference изолированы от GUI.
 
 ## Версионирование
@@ -30,12 +30,14 @@ inference изолированы от GUI.
 
 ## Возможности
 
-- bounded audio pipeline: CPAL → mono → 16 кГц → KWS → VAD → STT;
+- bounded audio pipeline: CPAL → mono → 16 кГц → KWS/VAD → STT;
 - при `Starting`/`Suspended` worker осушает bounded input без resample, VAD и inference;
 - отдельная задача runtime и supervised persistent STT worker с warm-up, timeout watchdog,
   bounded restart budget и exponential backoff;
-- потоковый STT начинается сразу после wake word, декодирует аудио параллельно захвату
-  100-мс батчами и публикует изменившиеся partial-транскрипты;
+- штатный continuous-режим через IPC сегментирует любую речь в ядре, сохраняет pre-roll
+  и публикует связанные по `session_id` partial/final-транскрипты;
+- обычная речь не попадает в command matching: действие разрешают wake word,
+  ручной push-to-talk/`submit_text` или одноразовое подтверждение;
 - IPC доступен в состоянии `Starting`, пока cancellable blocking worker загружает STT и публикует прогресс;
 - восстановление микрофона после ошибки или зависания callback и автоматическое
   переключение при смене default input;
@@ -105,10 +107,10 @@ cargo run -p assistant-daemon -- --config .\config\assistant.example.toml --mode
 cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models .\models status
 ```
 
-## Публичный Rust API v5
+## Публичный Rust API v6
 
 Стабильная граница экспорта находится в корне crate `assistant_core`.
-`CORE_API_VERSION` равен `5`. В v5 входят:
+`CORE_API_VERSION` равен `6`. В v6 входят:
 
 - `CommandHandler`, `HandlerSchema`, `HandlerRegistry` — extension API команд;
 - `RuntimeComponents`, `RuntimeUpdate`, `RuntimeHandle`, `RuntimeTask`,
@@ -117,10 +119,11 @@ cargo run -p assistant-cli -- --config .\config\assistant.example.toml --models 
   `Envelope`, `IpcErrorCode` — IPC API;
 - `CoreConfig`, `CommandConfig`, `SlotConfig`, публичные доменные события, состояния и ошибки;
 - streaming `SpeechRecognizer::push_stream_partial`;
+- VAD-сессии `SpeechStarted`/`SpeechEnded` и `TranscriptPartial`/`TranscriptFinal`;
 - `CoreMetrics`, `MetricsSnapshot`.
 
 Ломающие изменения этих контрактов требуют нового major crate API и увеличения
-`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v6; для
+`CORE_API_VERSION`. IPC меняется только совместимо внутри protocol v7; для
 несовместимого wire-формата увеличивается `PROTOCOL_VERSION`.
 
 Минимальное расширение команд:
@@ -163,7 +166,7 @@ handlers.register(Arc::new(Mute)).expect("unique valid handler");
 STT и wake word остаются заменяемыми через `SpeechRecognizer` и
 `WakeWordDetector`. GUI не встраивает внутренний runtime: он использует IPC.
 
-## IPC protocol v6
+## IPC protocol v7
 
 ### Web Speech API как внешний STT
 
@@ -218,7 +221,7 @@ Native bridge кодирует вызов как обычный IPC-запрос
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "request_id": "web-speech-1",
   "payload": {
     "type": "submit_text",
@@ -251,7 +254,7 @@ envelope имеет `protocol_version`, `request_id`, `payload` и little-endian
 - `get_status`, `get_health`, `get_config`, `get_metrics`, `list_handlers`;
 - `validate_config`, `apply_config`, `list_audio_devices`;
 - `get_model_status`, `install_model`, `cancel_model_install`, `verify_model`;
-- `suspend`, `resume`, `begin_capture`, `end_capture`, `submit_text`;
+- `suspend`, `resume`, `set_continuous_recognition`, `begin_capture`, `end_capture`, `submit_text`;
 - `confirm`, `cancel`;
 - `subscribe_events`, `shutdown`.
 
@@ -259,6 +262,13 @@ envelope имеет `protocol_version`, `request_id`, `payload` и little-endian
 только аудио не короче `audio.command_min_ms`. `submit_text` принимает непустую
 UTF-8 строку до 4096 байт, сопоставляет её с командой без обязательного wake-word
 prefix и применяет те же risk, confirmation и timeout rules.
+
+`set_continuous_recognition { enabled: true }` включает VAD-сегментацию в daemon:
+ядро публикует `speech_started { session_id }`, `speech_ended { session_id }`,
+`transcript_partial { session_id, text, confidence }` и
+`transcript_final { session_id, text, confidence }`. Речь без wake word
+только транскрибируется. Проверка тишины использует найденные VAD речевые
+кадры, поэтому trailing silence не занижает энергию всей записи.
 
 `CoreIpcClient` проверяет версию, ограничивает размер сообщения и повторяет
 кратковременное подключение. `subscribe_events` создаёт отдельный
@@ -268,8 +278,8 @@ prefix и применяет те же risk, confirmation и timeout rules.
 необязательными параметрами. `HealthSnapshot.components` сообщает состояние
 `ready/recovering/faulted/stopped` и число автоматических перезапусков.
 
-Поток событий публикует изменившиеся `transcript_partial { text, confidence }`,
-финальный `transcript_ready`, `audio_level { rms }` не чаще 10 раз в секунду и
+Поток событий публикует изменившиеся `transcript_partial { session_id, text, confidence }`,
+финальный `transcript_final { session_id, text, confidence }`, `audio_level { rms }` не чаще 10 раз в секунду и
 `transcript_unavailable { reason }`. Причины: `wake_word_not_detected`,
 `too_short`, `silence`, `model_unavailable`. `audio.device_id` не может быть
 пустым; для системного input используется значение `default`.
@@ -431,11 +441,15 @@ cargo run -p assistant-cli -- validate-config
 cargo run -p assistant-cli -- transcribe .\command.wav
 ```
 
-`inference.model` выбирает STT, а `wake_word.model` — отдельную online-модель
-KWS с `lang/bpe.model`. Offline-модели и модели без SentencePiece доступны для
+`inference.model` выбирает STT, а `wake_word.model` — отдельную streaming-модель
+KWS с `lang/bpe.model`. Модели `FinalOnly` и модели без SentencePiece доступны для
 STT, но намеренно отклоняются как wake-word модель. Смена модели через
 `ApplyConfig` требует перезапуска daemon; IPC `InstallModel` устанавливает обе
 выбранные модели.
+
+Загрузка использует изолированный временный Hugging Face cache для каждой установки,
+поэтому параллельные Windows-процессы не повреждают snapshot pointers. Сбой или panic
+источника модели возвращается как `ModelError::Hub`, не завершая background task.
 
 ```text
 models\<repo-name>\<revision>\
@@ -514,7 +528,7 @@ $env:VOICE_ASSISTANT_TEST_TRANSCRIPT = "ассистент открой блок
 cargo test -p assistant-core --all-features --test real_audio -- --ignored
 ```
 
-Для проверки любой online/offline модели каталога отдельно задайте
+Для проверки любой модели `Streaming`/`FinalOnly` из каталога отдельно задайте
 `VOICE_ASSISTANT_TEST_STT_WAV`, `VOICE_ASSISTANT_TEST_STT_MODEL`,
 `VOICE_ASSISTANT_TEST_STT_MODEL_ID` и `VOICE_ASSISTANT_TEST_STT_TRANSCRIPT`, затем
 запустите ignored-тест `fixed_real_wav_transcribes_with_selected_catalog_model`.
@@ -522,10 +536,11 @@ cargo test -p assistant-core --all-features --test real_audio -- --ignored
 Файл должен быть неизменным mono WAV; ожидаемый transcript фиксируется
 переменной окружения.
 
-Ручная проверка новых streaming-событий: запустите daemon с online-моделью,
-подпишитесь IPC-клиентом на events и произнесите wake word с командой. До
-`transcript_ready` должен появиться хотя бы один изменившийся
-`transcript_partial`. Для high-risk команды после `confirmation_required`
+Ручная проверка новых streaming-событий: запустите daemon с моделью `Streaming`,
+включите `set_continuous_recognition`, подпишитесь IPC-клиентом на events и произнесите
+обычную фразу, затем wake word с командой. Для каждой реплики должны совпадать
+`session_id` в `speech_started`, `speech_ended`, `transcript_partial` и
+`transcript_final`; первая реплика не запускает handler. Для high-risk команды после `confirmation_required`
 повторите wake word и скажите «да»; handler должен стартовать ровно один раз.
 
 ## Документация и проверки

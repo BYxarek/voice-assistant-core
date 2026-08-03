@@ -103,6 +103,25 @@ pub struct CommandCollector {
     max_samples: usize,
     trailing_silence_samples: usize,
     silence_samples: usize,
+    speech_samples: usize,
+    wake_word_detected: bool,
+}
+
+/// One VAD-segmented utterance and the metadata used by transcript policy.
+pub struct CapturedSpeech {
+    /// Bounded mono audio including pre-roll and trailing silence.
+    pub samples: Vec<f32>,
+    /// Number of samples from frames classified as speech by VAD.
+    pub speech_samples: usize,
+    /// Whether KWS detected an allowed wake word inside this utterance.
+    pub wake_word_detected: bool,
+}
+
+impl CapturedSpeech {
+    /// Returns whether VAD classified at least one frame as speech.
+    pub fn contains_speech(&self) -> bool {
+        self.speech_samples != 0
+    }
 }
 
 /// Pure frame collector joining pre-roll, VAD and command-length policy.
@@ -156,28 +175,42 @@ impl<V: VoiceActivityDetector> CommandAudioPipeline<V> {
     }
 
     /// Processes one frame and returns a completed command when policy stops capture.
-    pub fn push(&mut self, frame: &[f32], wake_word_detected: bool) -> Option<Vec<f32>> {
+    pub fn push(
+        &mut self,
+        frame: &[f32],
+        wake_word_detected: bool,
+        continuous: bool,
+    ) -> Option<CapturedSpeech> {
+        let decision = self.vad.process(frame);
         if let Some(collector) = self.collector.as_mut() {
-            let result = collector.push(frame, self.vad.process(frame));
+            collector.wake_word_detected |= wake_word_detected;
+            let result = collector.push(frame, decision);
             if result.is_some() {
                 self.reset();
             }
             return result;
         }
         self.ring.push(frame);
-        if wake_word_detected {
-            self.collector = Some(CommandCollector::start(
+        if wake_word_detected || (continuous && decision == VadDecision::Speech) {
+            let mut collector = CommandCollector::start(
                 self.ring.snapshot(),
                 self.min_samples,
                 self.max_samples,
                 self.trailing_silence_samples,
-            ));
+            );
+            collector.speech_samples = if decision == VadDecision::Speech {
+                frame.len()
+            } else {
+                0
+            };
+            collector.wake_word_detected = wake_word_detected;
+            self.collector = Some(collector);
         }
         None
     }
 
     /// Finishes an active manual capture, discarding audio shorter than the minimum.
-    pub fn finish(&mut self) -> Option<Vec<f32>> {
+    pub fn finish(&mut self) -> Option<CapturedSpeech> {
         let result = self.collector.take().and_then(CommandCollector::finish);
         self.reset();
         result
@@ -210,26 +243,41 @@ impl CommandCollector {
             max_samples,
             trailing_silence_samples,
             silence_samples: 0,
+            speech_samples: 0,
+            wake_word_detected: false,
         }
     }
 
     /// Appends one classified frame and returns completed audio when finished.
-    pub fn push(&mut self, frame: &[f32], decision: VadDecision) -> Option<Vec<f32>> {
+    pub fn push(&mut self, frame: &[f32], decision: VadDecision) -> Option<CapturedSpeech> {
         let remaining = self.max_samples.saturating_sub(self.samples.len());
         self.samples
             .extend_from_slice(&frame[..frame.len().min(remaining)]);
         self.silence_samples = match decision {
-            VadDecision::Speech => 0,
+            VadDecision::Speech => {
+                self.speech_samples = self
+                    .speech_samples
+                    .saturating_add(frame.len().min(remaining));
+                0
+            }
             VadDecision::Silence => self.silence_samples.saturating_add(frame.len()),
         };
         let complete = self.samples.len() >= self.max_samples
             || (self.samples.len() >= self.min_samples
                 && self.silence_samples >= self.trailing_silence_samples);
-        complete.then(|| std::mem::take(&mut self.samples))
+        complete.then(|| self.take())
     }
 
-    fn finish(mut self) -> Option<Vec<f32>> {
-        (self.samples.len() >= self.min_samples).then(|| std::mem::take(&mut self.samples))
+    fn finish(mut self) -> Option<CapturedSpeech> {
+        (self.samples.len() >= self.min_samples).then(|| self.take())
+    }
+
+    fn take(&mut self) -> CapturedSpeech {
+        CapturedSpeech {
+            samples: std::mem::take(&mut self.samples),
+            speech_samples: self.speech_samples,
+            wake_word_detected: self.wake_word_detected,
+        }
     }
 }
 
@@ -259,8 +307,11 @@ mod tests {
         let mut collector = CommandCollector::start(vec![1.0], 3, 10, 2);
         assert!(collector.push(&[1.0, 1.0], VadDecision::Speech).is_none());
         assert_eq!(
-            collector.push(&[0.0, 0.0], VadDecision::Silence),
-            Some(vec![1.0, 1.0, 1.0, 0.0, 0.0])
+            collector
+                .push(&[0.0, 0.0], VadDecision::Silence)
+                .unwrap()
+                .samples,
+            vec![1.0, 1.0, 1.0, 0.0, 0.0]
         );
     }
 
@@ -281,11 +332,11 @@ mod tests {
     #[test]
     fn frame_pipeline_collects_after_fake_wake_word() {
         let mut pipeline = CommandAudioPipeline::new(EnergyVad::new(0.5), 2, 3, 10, 2);
-        assert!(pipeline.push(&[1.0, 1.0], true).is_none());
-        assert!(pipeline.push(&[1.0], false).is_none());
+        assert!(pipeline.push(&[1.0, 1.0], true, false).is_none());
+        assert!(pipeline.push(&[1.0], false, false).is_none());
         assert_eq!(
-            pipeline.push(&[0.0, 0.0], false),
-            Some(vec![1.0, 1.0, 1.0, 0.0, 0.0])
+            pipeline.push(&[0.0, 0.0], false, false).unwrap().samples,
+            vec![1.0, 1.0, 1.0, 0.0, 0.0]
         );
     }
 
@@ -293,12 +344,33 @@ mod tests {
     fn manual_finish_keeps_only_a_long_enough_capture() {
         let mut pipeline = CommandAudioPipeline::new(EnergyVad::new(0.5), 0, 3, 10, 2);
         pipeline.start_manual();
-        pipeline.push(&[1.0], false);
+        pipeline.push(&[1.0], false, false);
         assert!(pipeline.finish().is_none());
 
         pipeline.start_manual();
-        pipeline.push(&[1.0, 1.0, 1.0], false);
-        assert_eq!(pipeline.finish(), Some(vec![1.0, 1.0, 1.0]));
+        pipeline.push(&[1.0, 1.0, 1.0], false, false);
+        assert_eq!(pipeline.finish().unwrap().samples, vec![1.0, 1.0, 1.0]);
         assert!(!pipeline.is_collecting());
+    }
+
+    #[test]
+    fn continuous_pipeline_segments_speech_with_pre_roll() {
+        let mut pipeline = CommandAudioPipeline::new(EnergyVad::new(0.5), 4, 2, 10, 2);
+        assert!(pipeline.push(&[0.0, 0.0], false, true).is_none());
+        assert!(pipeline.push(&[1.0, 1.0], false, true).is_none());
+        let captured = pipeline.push(&[0.0, 0.0], false, true).unwrap();
+        assert_eq!(captured.samples, vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(captured.speech_samples, 2);
+        assert!(!captured.wake_word_detected);
+    }
+
+    #[test]
+    fn speech_frames_survive_a_quiet_trailing_average() {
+        let mut pipeline = CommandAudioPipeline::new(EnergyVad::new(0.5), 0, 1, 20, 8);
+        pipeline.start_manual();
+        assert!(pipeline.push(&[1.0], false, false).is_none());
+        let captured = pipeline.push(&[0.0; 8], false, false).unwrap();
+        assert!(rms(&captured.samples) < 0.5);
+        assert!(captured.contains_speech());
     }
 }

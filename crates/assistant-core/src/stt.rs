@@ -209,7 +209,7 @@ impl SpeechRecognizer for SherpaOnnxRecognizer {
                 "sample rate must be non-zero".into(),
             ));
         }
-        if self.model.mode() == RecognitionMode::Offline {
+        if self.model.mode() == RecognitionMode::FinalOnly {
             return Ok(false);
         }
         let (response, result) = oneshot::channel();
@@ -500,7 +500,7 @@ fn create_recognizer(
     let path = |relative: &str| directory.join(relative).to_string_lossy().into_owned();
     let (encoder, decoder, joiner, tokens) = model.inference_files();
     match model.mode() {
-        RecognitionMode::Online => {
+        RecognitionMode::Streaming => {
             let mut config = OnlineRecognizerConfig::default();
             config.model_config.transducer.encoder = Some(path(encoder));
             config.model_config.transducer.decoder = Some(path(decoder));
@@ -514,7 +514,7 @@ fn create_recognizer(
                 .map(NativeRecognizer::Online)
                 .ok_or_else(|| "sherpa-onnx online initialization failed".into())
         }
-        RecognitionMode::Offline => {
+        RecognitionMode::FinalOnly => {
             let mut config = OfflineRecognizerConfig::default();
             config.model_config.transducer.encoder = Some(path(encoder));
             config.model_config.transducer.decoder = Some(path(decoder));

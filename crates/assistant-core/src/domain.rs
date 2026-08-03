@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::audio::AudioDeviceInfo;
 
 /// Current incompatible-version boundary for serialized IPC envelopes.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -169,11 +169,11 @@ impl AssistantState {
                 )
                 | (
                     SpeechDetected,
-                    WakeWordDetected | IdleListening | Recovering
+                    WakeWordDetected | CapturingCommand | IdleListening | Recovering
                 )
                 | (WakeWordDetected, CapturingCommand | Recovering)
                 | (CapturingCommand, Transcribing | IdleListening | Recovering)
-                | (Transcribing, MatchingCommand | Recovering)
+                | (Transcribing, MatchingCommand | IdleListening | Recovering)
                 | (
                     MatchingCommand,
                     ExecutingCommand | AwaitingConfirmation | Cooldown
@@ -203,8 +203,20 @@ pub enum AssistantEvent {
         /// State after the transition.
         current: AssistantState,
     },
-    /// STT produced a transcript.
-    TranscriptReady {
+    /// VAD started a bounded speech session.
+    SpeechStarted {
+        /// Monotonic daemon-local speech session identifier.
+        session_id: u64,
+    },
+    /// VAD ended a bounded speech session after trailing silence or the hard limit.
+    SpeechEnded {
+        /// Monotonic daemon-local speech session identifier.
+        session_id: u64,
+    },
+    /// STT produced the final transcript for a speech session.
+    TranscriptFinal {
+        /// Speech session shared with partial updates.
+        session_id: u64,
         /// Normalized recognizer output.
         text: String,
         /// Optional recognizer confidence.
@@ -212,6 +224,8 @@ pub enum AssistantEvent {
     },
     /// Streaming STT produced a non-final transcript update.
     TranscriptPartial {
+        /// Speech session shared with the final update.
+        session_id: u64,
         /// Current normalized recognizer output.
         text: String,
         /// Optional recognizer confidence.

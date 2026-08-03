@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.5.1] — 2026-08-03
+
+### Добавлено
+
+- IPC-режим непрерывного распознавания с VAD-сегментацией, pre-roll и событиями
+  `speech_started`/`speech_ended`;
+- общий `session_id` для `transcript_partial` и `transcript_final`.
+
+### Изменено
+
+- транскрипция отделена от command matching: речь без wake word публикуется, но не
+  запускает handler;
+- режимы моделей переименованы из `Online`/`Offline` в `Streaming`/`FinalOnly`;
+- публичный Rust API увеличен до v6, IPC wire protocol — до v7.
+
+### Исправлено
+
+- тишина определяется по речевым VAD-кадрам без занижения RMS хвостом паузы;
+- установка модели использует изолированный временный Hub cache, а panic источника
+  преобразуется в `ModelError::Hub` вместо завершения background task.
+
 ## [1.5.0] — 2026-08-03
 
 ### Производительность
@@ -135,3 +156,4 @@
 [1.3.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.3.0
 [1.4.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.4.0
 [1.5.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.0
+[1.5.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.1

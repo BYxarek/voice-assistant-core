@@ -53,11 +53,17 @@ pub struct RuntimeUpdate {
 enum Control {
     Start(oneshot::Sender<Result<(), CoreError>>),
     BeginCapture(oneshot::Sender<Result<(), CoreError>>),
+    BeginSpeech(bool, oneshot::Sender<Result<(), CoreError>>),
     BeginManualCapture(oneshot::Sender<Result<(), CoreError>>),
     CancelCapture(oneshot::Sender<Result<(), CoreError>>),
     BeginStream(u32, oneshot::Sender<Result<(), CoreError>>),
     PushStream(Vec<f32>, oneshot::Sender<Result<(), CoreError>>),
     Captured(TranscriptionRequest, oneshot::Sender<Result<(), CoreError>>),
+    CapturedSpeech(
+        TranscriptionRequest,
+        bool,
+        oneshot::Sender<Result<(), CoreError>>,
+    ),
     SubmitText(String, oneshot::Sender<Result<(), CoreError>>),
     Suspend(oneshot::Sender<Result<(), CoreError>>),
     Resume(oneshot::Sender<Result<(), CoreError>>),
@@ -114,6 +120,16 @@ impl RuntimeHandle {
         self.call(Control::BeginCapture).await
     }
 
+    /// Starts one VAD-delimited speech session.
+    pub async fn begin_speech_capture(&self, wake_word_detected: bool) -> Result<(), CoreError> {
+        let (response, receiver) = oneshot::channel();
+        self.controls
+            .send(Control::BeginSpeech(wake_word_detected, response))
+            .await
+            .map_err(|_| stopped())?;
+        receiver.await.map_err(|_| stopped())?
+    }
+
     /// Publishes capture state for an application-requested recording.
     pub async fn begin_manual_capture(&self) -> Result<(), CoreError> {
         self.call(Control::BeginManualCapture).await
@@ -149,6 +165,24 @@ impl RuntimeHandle {
         let (response, receiver) = oneshot::channel();
         self.controls
             .send(Control::Captured(request, response))
+            .await
+            .map_err(|_| stopped())?;
+        receiver.await.map_err(|_| stopped())?
+    }
+
+    /// Queues completed speech and its wake-word authorization for final STT.
+    pub async fn captured_speech(
+        &self,
+        request: TranscriptionRequest,
+        wake_word_detected: bool,
+    ) -> Result<(), CoreError> {
+        let (response, receiver) = oneshot::channel();
+        self.controls
+            .send(Control::CapturedSpeech(
+                request,
+                wake_word_detected,
+                response,
+            ))
             .await
             .map_err(|_| stopped())?;
         receiver.await.map_err(|_| stopped())?
@@ -329,6 +363,9 @@ pub fn spawn_runtime_service(
                         Control::BeginCapture(response) => {
                             let _ = response.send(runtime.start_command_capture());
                         }
+                        Control::BeginSpeech(wake_word_detected, response) => {
+                            let _ = response.send(runtime.start_speech_capture(wake_word_detected));
+                        }
                         Control::BeginManualCapture(response) => {
                             let _ = response.send(runtime.start_manual_capture());
                         }
@@ -343,6 +380,13 @@ pub fn spawn_runtime_service(
                         }
                         Control::Captured(request, response) => {
                             let _ = response.send(runtime.process_captured_audio(request).await);
+                        }
+                        Control::CapturedSpeech(request, wake_word_detected, response) => {
+                            let _ = response.send(
+                                runtime
+                                    .process_captured_speech(request, wake_word_detected)
+                                    .await,
+                            );
                         }
                         Control::SubmitText(text, response) => {
                             let _ = response.send(runtime.process_text(text).await);

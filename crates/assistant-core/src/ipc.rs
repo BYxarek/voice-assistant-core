@@ -72,6 +72,11 @@ pub enum CoreRequest {
     SuspendListening,
     /// Resumes listening.
     ResumeListening,
+    /// Enables or disables VAD-driven transcription of every speech segment.
+    SetContinuousRecognition {
+        /// When enabled, non-wake speech is transcribed but never matched as a command.
+        enabled: bool,
+    },
     /// Starts microphone capture without requiring the wake word.
     BeginCapture,
     /// Stops manual capture and submits audio that meets the configured minimum duration.
@@ -213,7 +218,7 @@ mod tests {
         let message = Envelope::new("golden-1", CoreRequest::GetStatus);
         assert_eq!(
             String::from_utf8(encode(&message).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"golden-1","payload":{"type":"get_status"}}"#
+            r#"{"protocol_version":7,"request_id":"golden-1","payload":{"type":"get_status"}}"#
         );
     }
 
@@ -222,7 +227,7 @@ mod tests {
         let begin = Envelope::new("manual-1", CoreRequest::BeginCapture);
         assert_eq!(
             String::from_utf8(encode(&begin).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
+            r#"{"protocol_version":7,"request_id":"manual-1","payload":{"type":"begin_capture"}}"#
         );
         let text = Envelope::new(
             "manual-2",
@@ -232,7 +237,15 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&text).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+            r#"{"protocol_version":7,"request_id":"manual-2","payload":{"type":"submit_text","text":"open notepad"}}"#
+        );
+        let continuous = Envelope::new(
+            "continuous-1",
+            CoreRequest::SetContinuousRecognition { enabled: true },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&continuous).unwrap()).unwrap(),
+            r#"{"protocol_version":7,"request_id":"continuous-1","payload":{"type":"set_continuous_recognition","enabled":true}}"#
         );
     }
 
@@ -242,6 +255,7 @@ mod tests {
             "event-0",
             CoreResponse::Event {
                 event: AssistantEvent::TranscriptPartial {
+                    session_id: 7,
                     text: "открой".into(),
                     confidence: None,
                 },
@@ -249,7 +263,21 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&partial).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"event-0","payload":{"type":"event","event":{"type":"transcript_partial","text":"открой","confidence":null}}}"#
+            r#"{"protocol_version":7,"request_id":"event-0","payload":{"type":"event","event":{"type":"transcript_partial","session_id":7,"text":"открой","confidence":null}}}"#
+        );
+        let final_transcript = Envelope::new(
+            "event-final",
+            CoreResponse::Event {
+                event: AssistantEvent::TranscriptFinal {
+                    session_id: 7,
+                    text: "открой блокнот".into(),
+                    confidence: Some(0.9),
+                },
+            },
+        );
+        assert_eq!(
+            String::from_utf8(encode(&final_transcript).unwrap()).unwrap(),
+            r#"{"protocol_version":7,"request_id":"event-final","payload":{"type":"event","event":{"type":"transcript_final","session_id":7,"text":"открой блокнот","confidence":0.9}}}"#
         );
         let level = Envelope::new(
             "event-1",
@@ -259,7 +287,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&level).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
+            r#"{"protocol_version":7,"request_id":"event-1","payload":{"type":"event","event":{"type":"audio_level","rms":0.25}}}"#
         );
         let unavailable = Envelope::new(
             "event-2",
@@ -271,7 +299,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(encode(&unavailable).unwrap()).unwrap(),
-            r#"{"protocol_version":6,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
+            r#"{"protocol_version":7,"request_id":"event-2","payload":{"type":"event","event":{"type":"transcript_unavailable","reason":"silence"}}}"#
         );
     }
 }

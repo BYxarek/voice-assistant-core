@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Voice Assistant Core — публичный API и руководство">
-  <title>Voice Assistant Core · API v5</title>
+  <title>Voice Assistant Core · API v6</title>
   <style>
     :root{color-scheme:dark;--bg:#09111e;--panel:#111d30;--text:#eef5ff;--muted:#a7b5ca;--line:#2b405e;--accent:#67d9ff}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 Segoe UI,system-ui,sans-serif}
@@ -25,7 +25,7 @@
     <a href="#architecture">Архитектура</a>
     <a href="#api">Публичный Rust API</a>
     <a href="#extension">Extension API</a>
-    <a href="#ipc">IPC v6</a>
+    <a href="#ipc">IPC v7</a>
     <a href="#config">Конфигурация</a>
     <a href="#models">Модели</a>
     <a href="#diagnostics">Диагностика</a>
@@ -33,8 +33,8 @@
   </nav>
   <main>
     <h1>Voice Assistant Core</h1>
-    <p>Voice Assistant Core <strong>1.5.0</strong> — локальное Windows-ядро с
-      versioned IPC и стабильным Rust extension API v5.
+    <p>Voice Assistant Core <strong>1.5.1</strong> — локальное Windows-ядро с
+      versioned IPC и стабильным Rust extension API v6.
       GUI, аудио, inference и типизированные команды разделены явными границами.</p>
     <p><a href="rustdoc/assistant_core/index.html">Открыть опубликованный Rustdoc</a>.
       Локально после <code>cargo doc --workspace --all-features --no-deps</code>
@@ -60,7 +60,7 @@ cargo run -p assistant-cli -- status</code></pre>
 
     <h2 id="architecture">Архитектура</h2>
     <pre><code>GUI / CLI
-    → Named Pipe protocol v6
+    → Named Pipe protocol v7
     → Runtime task
     → Audio / KWS / VAD / STT / Commands</code></pre>
     <p>Audio callback выполняет только преобразование кадров и неблокирующую
@@ -69,7 +69,7 @@ cargo run -p assistant-cli -- status</code></pre>
       resample, VAD или inference; streaming STT получает 100-мс батчи. Текущие
       состояние и health читаются без ожидания inference.</p>
 
-    <h2 id="api">Публичный Rust API v5</h2>
+    <h2 id="api">Публичный Rust API v6</h2>
     <table>
       <tr><th>Граница</th><th>Типы</th></tr>
       <tr><td>Extensions</td><td><code>CommandHandler</code>, <code>HandlerSchema</code>, <code>HandlerRegistry</code></td></tr>
@@ -77,8 +77,9 @@ cargo run -p assistant-cli -- status</code></pre>
       <tr><td>IPC client</td><td><code>CoreIpcClient</code>, <code>EventSubscription</code>, request/response/envelope/error types</td></tr>
       <tr><td>Domain</td><td>config, states, events, health, model status, typed errors and metrics</td></tr>
     </table>
-    <p><code>CORE_API_VERSION = 5</code>. API включает typed command slots и
-      <code>SpeechRecognizer::push_stream_partial</code>. Ломающие Rust-изменения требуют новой
+    <p><code>CORE_API_VERSION = 6</code>. API включает typed command slots,
+      speech session events и <code>SpeechRecognizer::push_stream_partial</code>.
+      Ломающие Rust-изменения требуют новой
       major-версии API. Несовместимое изменение wire-формата требует новой
       <code>PROTOCOL_VERSION</code>.</p>
 
@@ -105,7 +106,7 @@ handlers.register(Arc::new(Mute))?;</code></pre>
       неизвестные, пропущенные и лишние параметры до запуска runtime.
       Распознанный текст не передаётся в shell.</p>
 
-    <h2 id="ipc">IPC protocol v6</h2>
+    <h2 id="ipc">IPC protocol v7</h2>
     <h3>Web Speech API как внешний STT</h3>
     <p>Web Speech API подключается без изменения ядра и протокола: браузерный <code>SpeechRecognition</code> передаёт финальный текст через native bridge GUI в существующий запрос <code>submit_text</code>.</p>
     <pre><code>SpeechRecognition → native bridge GUI → Windows named pipe
@@ -143,7 +144,7 @@ document.querySelector("#listen").addEventListener("click", () =&gt; {
 });</code></pre>
     <p>Native bridge отправляет существующий IPC-запрос:</p>
     <pre><code>{
-  "protocol_version": 6,
+  "protocol_version": 7,
   "request_id": "web-speech-1",
   "payload": {
     "type": "submit_text",
@@ -156,7 +157,7 @@ document.querySelector("#listen").addEventListener("click", () =&gt; {
       JSON envelope с <code>protocol_version</code> и лимитом 1 МиБ.</p>
     <p>API включает health/status/config/metrics/audio devices/handler schemas, validate/apply
       config, status/install/cancel/verify model, suspend/resume,
-      begin/end capture, submit text, confirm/cancel, events и shutdown.
+      continuous recognition, begin/end capture, submit text, confirm/cancel, events и shutdown.
       <code>begin_capture</code> включает push-to-talk без wake word;
       <code>end_capture</code> отправляет достаточно длинную запись в STT.
       <code>submit_text</code> принимает до 4096 байт и использует тот же
@@ -166,8 +167,15 @@ document.querySelector("#listen").addEventListener("click", () =&gt; {
     <p>IPC начинает обслуживать GUI до загрузки STT: состояние остаётся
       <code>Starting</code>, а <code>ModelStatus::Loading</code> и
       <code>ModelLoadProgress</code> сообщают этап и процент загрузки.</p>
-    <p>GUI получает изменившийся <code>transcript_partial { text, confidence }</code>,
-      финальный <code>transcript_ready</code>, <code>audio_level { rms }</code> не чаще 10 раз в секунду и
+    <p><code>set_continuous_recognition { enabled: true }</code> переносит VAD-сегментацию
+      полностью в daemon: pre-roll сохраняется, а обычная речь транскрибируется без запуска
+      команды. Matching разрешают wake word, явный push-to-talk/<code>submit_text</code> или
+      подтверждение. Тишина определяется по VAD-речевым кадрам, а не по RMS записи с хвостом.</p>
+    <p>GUI получает <code>speech_started { session_id }</code>,
+      <code>speech_ended { session_id }</code>, изменившийся
+      <code>transcript_partial { session_id, text, confidence }</code>, финальный
+      <code>transcript_final { session_id, text, confidence }</code>,
+      <code>audio_level { rms }</code> не чаще 10 раз в секунду и
       <code>transcript_unavailable { reason }</code> с причинами
       <code>wake_word_not_detected</code>, <code>too_short</code>, <code>silence</code>
       или <code>model_unavailable</code>. Пустой <code>audio.device_id</code> отклоняется.</p>
@@ -192,7 +200,7 @@ document.querySelector("#listen").addEventListener("click", () =&gt; {
       Настройки pipe применяются после перезапуска.</p>
     <p><code>wake_word.aliases</code> добавляет варианты обращения.
       <code>inference.model</code> выбирает STT-модель, а <code>wake_word.model</code> —
-      отдельную совместимую online-модель для KWS. Смена модели требует перезапуска daemon.
+      отдельную совместимую streaming-модель для KWS. Смена модели требует перезапуска daemon.
       <code>inference.threads = 0</code> выбирает host parallelism, а
       <code>max_restarts</code>/<code>restart_backoff_ms</code> ограничивают
       автоматическое восстановление STT.</p>
@@ -263,8 +271,8 @@ level = "{level}"</code></pre>
 
     <h2 id="models">Модели</h2>
     <p>Встроенный pinned-каталог поддерживает семь моделей <code>alphacep/vosk-model*</code>
-      для русского, бенгальского, таджикского и узбекского языков. Online-модели
-      распознаются во время захвата, offline-модели получают завершённую запись.
+      для русского, бенгальского, таджикского и узбекского языков. Модели
+      <code>Streaming</code> распознают во время захвата, <code>FinalOnly</code> получают завершённую запись.
       <code>assistant-cli models list</code> показывает режим и совместимость с KWS.</p>
     <pre><code>cargo run -p assistant-cli -- models list
 cargo run -p assistant-cli -- models install alphacep/vosk-model-small-ru
@@ -273,8 +281,9 @@ cargo run -p assistant-cli -- validate-config
 cargo run -p assistant-cli -- transcribe .\command.wav</code></pre>
     <p>Установка использует фиксированный commit SHA, allowlist файлов и
       SHA-256 manifest. Прогресс и отмена установки и blocking-загрузки STT
-      доступны через IPC. Активация
-      атомарна; неудачная переустановка не уничтожает прежнюю ревизию.</p>
+      доступны через IPC. Установка использует изолированный временный Hub cache;
+      panic источника преобразуется в типизированную ошибку и не завершает background task.
+      Активация атомарна; неудачная переустановка не уничтожает прежнюю ревизию.</p>
     <p>Перед сетью проверяются свободное место и write/rename. STT прогревается,
       начинает decoding сразу после wake word и перезапускается watchdog-ом с
       exponential backoff; audio supervisor после повторных ошибок открывает

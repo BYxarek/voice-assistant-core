@@ -73,6 +73,7 @@ struct DaemonContext {
     audio_faulted: Arc<AtomicBool>,
     active_audio_device: Arc<Mutex<ActiveAudioDevice>>,
     manual_capture: Arc<AtomicU8>,
+    continuous_recognition: Arc<AtomicBool>,
     listening: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     metrics: CoreMetrics,
@@ -81,10 +82,13 @@ struct DaemonContext {
 }
 
 enum PipelineMessage {
-    WakeWord(u32),
+    SpeechBegin {
+        sample_rate: u32,
+        wake_word_detected: bool,
+    },
     StreamBegin(u32),
     StreamChunk(Vec<f32>),
-    Command(TranscriptionRequest),
+    Speech(TranscriptionRequest, bool),
     CaptureCancelled,
     CaptureUnavailable(TranscriptUnavailableReason),
     TranscriptUnavailable(TranscriptUnavailableReason),
@@ -181,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
     }));
     let audio_generation = Arc::new(AtomicU64::new(0));
     let manual_capture = Arc::new(AtomicU8::new(MANUAL_CAPTURE_IDLE));
+    let continuous_recognition = Arc::new(AtomicBool::new(false));
     let (process_shutdown, mut process_shutdown_rx) = watch::channel(false);
     let context = DaemonContext {
         runtime: runtime.clone(),
@@ -200,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         audio_faulted: Arc::clone(&audio_faulted),
         active_audio_device: Arc::new(Mutex::new(ActiveAudioDevice::default())),
         manual_capture: Arc::clone(&manual_capture),
+        continuous_recognition: Arc::clone(&continuous_recognition),
         listening: Arc::clone(&listening),
         stopping: Arc::clone(&stopping),
         metrics: metrics.clone(),
@@ -215,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         let ready = Arc::clone(&audio_ready);
         let faulted = Arc::clone(&audio_faulted);
         let manual_capture = Arc::clone(&manual_capture);
+        let continuous_recognition = Arc::clone(&continuous_recognition);
         let metrics = metrics.clone();
         tokio::task::spawn_blocking(move || {
             audio_loop(
@@ -226,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                 ready,
                 faulted,
                 manual_capture,
+                continuous_recognition,
                 metrics,
             )
         })
@@ -234,9 +242,16 @@ async fn main() -> anyhow::Result<()> {
     let bridge = tokio::spawn(async move {
         while let Some(message) = pipeline_rx.recv().await {
             match message {
-                PipelineMessage::WakeWord(sample_rate) => {
-                    if let Err(error) = bridge_context.runtime.begin_capture().await {
-                        tracing::debug!(%error, "wake word ignored while runtime is busy");
+                PipelineMessage::SpeechBegin {
+                    sample_rate,
+                    wake_word_detected,
+                } => {
+                    if let Err(error) = bridge_context
+                        .runtime
+                        .begin_speech_capture(wake_word_detected)
+                        .await
+                    {
+                        tracing::debug!(%error, "speech ignored while runtime is busy");
                     } else if let Err(error) = bridge_context
                         .runtime
                         .begin_transcription_stream(sample_rate)
@@ -263,9 +278,13 @@ async fn main() -> anyhow::Result<()> {
                         tracing::warn!(%error, "incremental STT chunk failed");
                     }
                 }
-                PipelineMessage::Command(request) => {
-                    if let Err(error) = bridge_context.runtime.captured_audio(request).await {
-                        tracing::warn!(%error, "command pipeline recovered");
+                PipelineMessage::Speech(request, wake_word_detected) => {
+                    if let Err(error) = bridge_context
+                        .runtime
+                        .captured_speech(request, wake_word_detected)
+                        .await
+                    {
+                        tracing::warn!(%error, "speech pipeline recovered");
                     }
                 }
                 PipelineMessage::CaptureCancelled => {
@@ -462,6 +481,12 @@ async fn handle_request(context: DaemonContext, request: CoreRequest) -> CoreRes
             }
             Err(error) => core_error(error),
         },
+        CoreRequest::SetContinuousRecognition { enabled } => {
+            context
+                .continuous_recognition
+                .store(enabled, Ordering::Release);
+            CoreResponse::Accepted
+        }
         CoreRequest::BeginCapture => {
             if !context.listening.load(Ordering::Acquire)
                 || !context.audio_ready.load(Ordering::Acquire)
@@ -1290,6 +1315,7 @@ fn audio_loop(
     ready: Arc<AtomicBool>,
     faulted: Arc<AtomicBool>,
     manual_capture: Arc<AtomicU8>,
+    continuous_recognition: Arc<AtomicBool>,
     metrics: CoreMetrics,
 ) -> Result<(), String> {
     const MAX_RESTARTS: u32 = 5;
@@ -1342,6 +1368,7 @@ fn audio_loop(
             &stopping,
             &ready,
             &manual_capture,
+            &continuous_recognition,
             &metrics,
             &generation,
             current_generation,
@@ -1409,6 +1436,7 @@ fn audio_session(
     stopping: &AtomicBool,
     ready: &AtomicBool,
     manual_capture: &AtomicU8,
+    continuous_recognition: &AtomicBool,
     metrics: &CoreMetrics,
     generation: &AtomicU64,
     expected_generation: u64,
@@ -1567,13 +1595,16 @@ fn audio_session(
                     None => {
                         PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::TooShort)
                     }
-                    Some(samples) if rms(&samples) < config.audio.vad_threshold => {
+                    Some(captured) if !captured.contains_speech() => {
                         PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)
                     }
-                    Some(samples) => PipelineMessage::Command(TranscriptionRequest {
-                        samples,
-                        sample_rate: target_rate,
-                    }),
+                    Some(captured) => PipelineMessage::Speech(
+                        TranscriptionRequest {
+                            samples: captured.samples,
+                            sample_rate: target_rate,
+                        },
+                        true,
+                    ),
                 };
                 commands
                     .blocking_send(message)
@@ -1582,25 +1613,22 @@ fn audio_session(
                     Instant::now() + Duration::from_millis(config.wake_word.cooldown_ms);
                 continue;
             }
+            let continuous = continuous_recognition.load(Ordering::Acquire);
             let detected = if manual_capture.load(Ordering::Acquire) == MANUAL_CAPTURE_IDLE
-                && !pipeline.is_collecting()
+                && (!pipeline.is_collecting() || continuous)
                 && Instant::now() >= cooldown_until
             {
                 let started = Instant::now();
                 let detected = detector.process(&frame).is_some();
                 metrics.observe_kws(started.elapsed().as_micros() as u64);
-                if detected {
-                    commands
-                        .blocking_send(PipelineMessage::WakeWord(target_rate))
-                        .map_err(|_| "runtime command queue closed".to_string())?;
-                }
                 detected
             } else {
                 false
             };
             if detected {
                 missed_wake_word.reset();
-            } else if manual_capture.load(Ordering::Acquire) == MANUAL_CAPTURE_IDLE
+            } else if !continuous
+                && manual_capture.load(Ordering::Acquire) == MANUAL_CAPTURE_IDLE
                 && !pipeline.is_collecting()
                 && Instant::now() >= cooldown_until
                 && missed_wake_word.observe(
@@ -1616,29 +1644,43 @@ fn audio_session(
             }
             let was_manual = manual_capture.load(Ordering::Acquire) != MANUAL_CAPTURE_IDLE;
             let was_collecting = pipeline.is_collecting();
-            let completed = pipeline.push(&frame, detected);
-            if detected || was_collecting {
+            let completed = pipeline.push(&frame, detected, continuous);
+            if !was_collecting && pipeline.is_collecting() {
+                commands
+                    .blocking_send(PipelineMessage::SpeechBegin {
+                        sample_rate: target_rate,
+                        wake_word_detected: detected,
+                    })
+                    .map_err(|_| "runtime command queue closed".to_string())?;
+            }
+            if pipeline.is_collecting() || was_collecting {
                 stream_buffer.extend_from_slice(&frame);
                 if stream_buffer.len() >= stream_chunk_samples {
                     flush_stream_chunk(commands, &mut stream_buffer, stream_chunk_samples)?;
                 }
             }
-            if let Some(samples) = completed {
+            if let Some(captured) = completed {
                 manual_capture.store(MANUAL_CAPTURE_IDLE, Ordering::Release);
                 flush_stream_chunk(commands, &mut stream_buffer, stream_chunk_samples)?;
-                let message = if was_manual && rms(&samples) < config.audio.vad_threshold {
+                let wake_word_detected = captured.wake_word_detected;
+                let message = if was_manual && !captured.contains_speech() {
                     PipelineMessage::CaptureUnavailable(TranscriptUnavailableReason::Silence)
                 } else {
-                    PipelineMessage::Command(TranscriptionRequest {
-                        samples,
-                        sample_rate: target_rate,
-                    })
+                    PipelineMessage::Speech(
+                        TranscriptionRequest {
+                            samples: captured.samples,
+                            sample_rate: target_rate,
+                        },
+                        was_manual || wake_word_detected,
+                    )
                 };
                 commands
                     .blocking_send(message)
                     .map_err(|_| "runtime command queue closed".to_string())?;
-                cooldown_until =
-                    Instant::now() + Duration::from_millis(config.wake_word.cooldown_ms);
+                if was_manual || wake_word_detected {
+                    cooldown_until =
+                        Instant::now() + Duration::from_millis(config.wake_word.cooldown_ms);
+                }
             }
         }
     }

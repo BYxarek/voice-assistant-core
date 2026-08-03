@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::Read,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -8,7 +9,7 @@ use std::{
 
 use hf_hub::{
     Repo, RepoType,
-    api::sync::{ApiBuilder, ApiRepo},
+    api::sync::{ApiBuilder, ApiError, ApiRepo},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,9 +55,9 @@ const OFFLINE_TG_UZ_FILES: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecognitionMode {
     /// Incremental recognition while audio is captured.
-    Online,
+    Streaming,
     /// Recognition after the complete utterance is available.
-    Offline,
+    FinalOnly,
 }
 
 /// Immutable allowlisted description of one supported Alphacep model.
@@ -97,7 +98,7 @@ impl ModelSpec {
 
     /// Whether the model includes the SentencePiece data required by keyword spotting.
     pub fn supports_wake_word(self) -> bool {
-        self.files.contains(&"lang/bpe.model") && self.mode == RecognitionMode::Online
+        self.files.contains(&"lang/bpe.model") && self.mode == RecognitionMode::Streaming
     }
 
     /// Returns the pinned encoder, decoder, joiner and token paths.
@@ -133,49 +134,49 @@ pub const ALPHACEP_MODELS: &[ModelSpec] = &[
         ALPHACEP_STREAMING_RU_REPO,
         ALPHACEP_STREAMING_RU_REVISION,
         "ru",
-        RecognitionMode::Online,
+        RecognitionMode::Streaming,
         ALPHACEP_STREAMING_RU_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-small-streaming-ru",
         "e18123ee13f694036a1eea82eb43f9895387cb59",
         "ru",
-        RecognitionMode::Online,
+        RecognitionMode::Streaming,
         SMALL_STREAMING_RU_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-small-streaming-bn",
         "501097ae5257e5859d7956b50e4ba53a3f2be106",
         "bn",
-        RecognitionMode::Online,
+        RecognitionMode::Streaming,
         SMALL_STREAMING_BN_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-ru",
         "df6a54a4d8e5d43e82675e4f5dba2d507731a0d1",
         "ru",
-        RecognitionMode::Offline,
+        RecognitionMode::FinalOnly,
         OFFLINE_RU_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-small-ru",
         "4d68c4017bcfa44e2a79581f7933339e916a35da",
         "ru",
-        RecognitionMode::Offline,
+        RecognitionMode::FinalOnly,
         OFFLINE_SMALL_RU_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-tg",
         "b4900abb39cad697d97d6091a262bbca41fab49c",
         "tg",
-        RecognitionMode::Offline,
+        RecognitionMode::FinalOnly,
         OFFLINE_TG_UZ_FILES,
     ),
     ModelSpec::new(
         "alphacep/vosk-model-small-streaming-uz",
         "e0417cabfbbac4efdc34e7aba367501d126ae79c",
         "uz",
-        RecognitionMode::Offline,
+        RecognitionMode::FinalOnly,
         OFFLINE_TG_UZ_FILES,
     ),
 ];
@@ -321,7 +322,9 @@ impl ModelManager {
         fs::create_dir(&temporary)?;
 
         let result = (|| {
+            let hub_cache = temporary.join(".hub-cache");
             let api = ApiBuilder::new()
+                .with_cache_dir(hub_cache.clone())
                 .with_progress(true)
                 .build()
                 .map_err(|e| ModelError::Hub(e.to_string()))?;
@@ -331,6 +334,7 @@ impl ModelManager {
                 spec.revision().into(),
             ));
             let files = copy_model_files(spec, &repo, &temporary, cancelled, &mut progress)?;
+            fs::remove_dir_all(hub_cache)?;
             let manifest = ModelManifest {
                 schema_version: 1,
                 model_id: spec.id().into(),
@@ -501,9 +505,7 @@ fn copy_model_files(
         if cancelled.load(Ordering::Acquire) {
             return Err(ModelError::Cancelled);
         }
-        let source = repo
-            .get(relative)
-            .map_err(|e| ModelError::Hub(e.to_string()))?;
+        let source = model_source(relative, || repo.get(relative))?;
         let target = destination.join(relative);
         let parent = target
             .parent()
@@ -522,6 +524,15 @@ fn copy_model_files(
         });
     }
     Ok(files)
+}
+
+fn model_source<T>(
+    relative: &str,
+    operation: impl FnOnce() -> Result<T, ApiError>,
+) -> Result<T, ModelError> {
+    catch_unwind(AssertUnwindSafe(operation))
+        .map_err(|_| ModelError::Hub(format!("model source failed to prepare {relative}")))?
+        .map_err(|error| ModelError::Hub(error.to_string()))
 }
 
 fn digest(path: &Path) -> Result<String, ModelError> {
@@ -591,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_covers_online_offline_and_path_variants() {
+    fn catalog_covers_streaming_final_only_and_path_variants() {
         assert_eq!(ALPHACEP_MODELS.len(), 7);
         assert!(
             model_spec("alphacep/vosk-model-small-streaming-bn")
@@ -599,12 +610,19 @@ mod tests {
                 .supports_wake_word()
         );
         let small_ru = model_spec("alphacep/vosk-model-small-ru").unwrap();
-        assert_eq!(small_ru.mode(), RecognitionMode::Offline);
+        assert_eq!(small_ru.mode(), RecognitionMode::FinalOnly);
         assert_eq!(small_ru.inference_files().0, "am/encoder.int8.onnx");
         assert!(
             !model_spec("alphacep/vosk-model-tg")
                 .unwrap()
                 .supports_wake_word()
         );
+    }
+
+    #[test]
+    fn model_source_panic_becomes_a_typed_error() {
+        let error =
+            model_source::<()>("am/model.onnx", || panic!("upstream cache assertion")).unwrap_err();
+        assert!(matches!(error, ModelError::Hub(message) if message.contains("am/model.onnx")));
     }
 }

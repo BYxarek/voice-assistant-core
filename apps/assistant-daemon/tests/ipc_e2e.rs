@@ -125,6 +125,13 @@ async fn daemon_serves_ipc_client_until_remote_shutdown() {
             ..
         }
     ));
+    assert!(matches!(
+        client
+            .request(CoreRequest::SetContinuousRecognition { enabled: true })
+            .await
+            .unwrap(),
+        CoreResponse::Accepted
+    ));
 
     assert!(matches!(
         client.request(CoreRequest::SuspendListening).await.unwrap(),

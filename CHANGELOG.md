@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2-rc.2] — 2026-08-03
+
+### Исправлено
+
+- журнал daemon перенесён из защищённого каталога установки в
+  `%LOCALAPPDATA%\VoiceAssistantCore\logs\assistant-daemon.log`.
+
 ## [1.5.2-rc.1] — 2026-08-03
 
 ### Добавлено
@@ -170,3 +177,4 @@
 [1.5.0]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.0
 [1.5.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.1
 [1.5.2-rc.1]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.1
+[1.5.2-rc.2]: https://github.com/BYxarek/voice-assistant-core/releases/tag/v1.5.2-rc.2

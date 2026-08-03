@@ -22,7 +22,7 @@
 <a class="skip" href="#main">К содержанию</a><div class="progress" id="progress"></div>
 <div class="layout">
   <aside class="sidebar">
-    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.5.2-rc.1 · Public API v6</span></span></a>
+    <a class="brand" href="index.html"><span class="mark">VA</span><span>Voice Assistant Core<span class="version">Core 1.5.2-rc.2 · Public API v6</span></span></a>
     <div class="search-wrap"><label class="sr-only" for="search">Поиск</label><input id="search" class="search" type="search" placeholder="Поиск по API…" autocomplete="off"><span class="search-key">/</span></div>
     <div class="nav-title">Содержание</div><nav class="nav" aria-label="Разделы API"><a href="#section-1" data-nav="section-1"><span>01</span>Версии, Cargo features и платформы</a>
 <a href="#section-2" data-nav="section-2"><span>02</span>Публичные модули</a>
@@ -46,7 +46,7 @@
   <main id="main"><div class="content">
     <header class="hero searchable"><div class="eyebrow">Developer reference · 17 разделов</div><h1>Полный справочник API</h1><p>Rust embedding, расширения команд, runtime, IPC, конфигурация, модели, аудио и всё необходимое для создания приложения поверх ядра.</p><div class="badges"><span class="badge"><strong>Core API</strong> v6</span><span class="badge"><strong>IPC</strong> v7</span><span class="badge"><strong>Config</strong> schema 6</span></div></header>
     <div id="empty" class="empty">Ничего не найдено. Попробуйте имя типа, метода или IPC-запроса.</div>
-    <p>Этот документ описывает публичный контракт <code>assistant-core</code> 1.5.2-rc.1: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
+    <p>Этот документ описывает публичный контракт <code>assistant-core</code> 1.5.2-rc.2: встраивание runtime, расширения команд, адаптеры, конфигурацию, IPC, события, модели, аудио, метрики и диагностические приложения. Точные сигнатуры доступны в <a href="../target/doc/assistant_core/index.html">Rustdoc</a>.</p>
 <section id="section-1" class="doc-section searchable"><div class="section-kicker">Раздел 1</div><h2>Версии, Cargo features и платформы</h2>
 <ul>
 <li><code>CORE_API_VERSION = 6</code> — версия публичного Rust extension/embedding API.</li>
@@ -57,7 +57,7 @@
 <li>feature <code>stt-sherpa-onnx</code> включает <code>SherpaOnnxRecognizer</code> и wake-word API.</li>
 </ul>
 <div class="code-block"><div class="code-head"><span>toml</span><button type="button" class="copy" aria-label="Копировать код">Копировать</button></div><pre><code class="language-toml">[dependencies]
-assistant-core = { git = "https://github.com/BYxarek/voice-assistant-core", tag = "v1.5.2-rc.1", features = ["stt-sherpa-onnx"] }
+assistant-core = { git = "https://github.com/BYxarek/voice-assistant-core", tag = "v1.5.2-rc.2", features = ["stt-sherpa-onnx"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }</code></pre></div>
 <p>Ломающий Rust-контракт требует увеличения major-версии crate и <code>CORE_API_VERSION</code>. Несовместимый JSON/framing требует новой <code>PROTOCOL_VERSION</code>.</p>
 </section>

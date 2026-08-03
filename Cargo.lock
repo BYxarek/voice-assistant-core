@@ -97,7 +97,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "assistant-cli"
-version = "1.5.2-rc.1"
+version = "1.5.2-rc.2"
 dependencies = [
  "anyhow",
  "assistant-core",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-core"
-version = "1.5.2-rc.1"
+version = "1.5.2-rc.2"
 dependencies = [
  "async-trait",
  "cpal",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-daemon"
-version = "1.5.2-rc.1"
+version = "1.5.2-rc.2"
 dependencies = [
  "anyhow",
  "assistant-core",

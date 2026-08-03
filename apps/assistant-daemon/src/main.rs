@@ -144,7 +144,9 @@ impl MissedWakeWord {
 }
 
 fn main() -> anyhow::Result<()> {
-    let log_path = initialize_logging()?;
+    let paths = AppPaths::discover()?;
+    paths.ensure_directories()?;
+    let log_path = initialize_logging(&paths)?;
     install_panic_logger();
     tracing::info!(
         core_version = CORE_VERSION,
@@ -155,7 +157,7 @@ fn main() -> anyhow::Result<()> {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(run())
+            .block_on(run(paths))
     })();
     if let Err(error) = &result {
         tracing::error!(error = ?error, "assistant daemon stopped with an error");
@@ -163,8 +165,8 @@ fn main() -> anyhow::Result<()> {
     result
 }
 
-fn initialize_logging() -> anyhow::Result<PathBuf> {
-    let path = std::env::current_exe()?.with_file_name("assistant-daemon.log");
+fn initialize_logging(paths: &AppPaths) -> anyhow::Result<PathBuf> {
+    let path = paths.logs.join("assistant-daemon.log");
     let file = Arc::new(OpenOptions::new().create(true).append(true).open(&path)?);
     tracing_subscriber::fmt()
         .with_env_filter("warn,assistant_core=trace,assistant_daemon=trace")
@@ -192,10 +194,8 @@ fn install_panic_logger() {
     }));
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(paths: AppPaths) -> anyhow::Result<()> {
     let args = Args::parse();
-    let paths = AppPaths::discover()?;
-    paths.ensure_directories()?;
     let config_path = args.config.unwrap_or(paths.config);
     let model_root = args.models.unwrap_or(paths.models);
     if !config_path.is_file() {
